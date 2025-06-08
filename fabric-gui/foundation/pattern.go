@@ -70,18 +70,26 @@ func (pl *PatternLoader) LoadPatternDescriptions() error {
 
 // LoadAllPatterns loads all patterns from the patterns directory
 func (pl *PatternLoader) LoadAllPatterns() ([]Pattern, error) {
+	log.Println("LoadAllPatterns: Starting to load patterns from", pl.PatternsDir)
+	
 	// Make sure descriptions are loaded
 	if len(pl.descriptionsByName) == 0 {
+		log.Println("LoadAllPatterns: Loading pattern descriptions")
 		if err := pl.LoadPatternDescriptions(); err != nil {
+			log.Printf("LoadAllPatterns: Failed to load pattern descriptions: %v", err)
 			return nil, err
 		}
+		log.Printf("LoadAllPatterns: Loaded %d pattern descriptions", len(pl.descriptionsByName))
 	}
 
 	// List pattern directories
+	log.Println("LoadAllPatterns: Reading pattern directory")
 	entries, err := os.ReadDir(pl.PatternsDir)
 	if err != nil {
+		log.Printf("LoadAllPatterns: Failed to read patterns directory: %v", err)
 		return nil, fmt.Errorf("failed to read patterns directory: %w", err)
 	}
+	log.Printf("LoadAllPatterns: Found %d entries in patterns directory", len(entries))
 
 	// Load each pattern
 	patterns := make([]Pattern, 0, len(entries))
@@ -91,20 +99,24 @@ func (pl *PatternLoader) LoadAllPatterns() ([]Pattern, error) {
 		}
 
 		patternID := entry.Name()
+		log.Printf("LoadAllPatterns: Loading pattern %s", patternID)
 		pattern, err := pl.LoadPattern(patternID)
 		if err != nil {
-			fmt.Printf("Warning: failed to load pattern %s: %v\n", patternID, err)
+			log.Printf("LoadAllPatterns: Warning: failed to load pattern %s: %v", patternID, err)
 			continue // Skip patterns that fail to load
 		}
 
 		patterns = append(patterns, pattern)
 	}
 
+	log.Printf("LoadAllPatterns: Successfully loaded %d patterns", len(patterns))
 	return patterns, nil
 }
 
 // LoadPattern loads a single pattern by ID
 func (pl *PatternLoader) LoadPattern(patternID string) (Pattern, error) {
+	log.Printf("LoadPattern: Loading pattern %s", patternID)
+	
 	pattern := Pattern{
 		ID:   patternID,
 		Name: formatPatternName(patternID),
@@ -112,32 +124,49 @@ func (pl *PatternLoader) LoadPattern(patternID string) (Pattern, error) {
 
 	// Load system.md
 	systemPath := filepath.Join(pl.PatternsDir, patternID, "system.md")
+	log.Printf("LoadPattern: Reading system.md from %s", systemPath)
 	systemContent, err := os.ReadFile(systemPath)
 	if err != nil {
+		log.Printf("LoadPattern: Failed to read system.md: %v", err)
 		return Pattern{}, fmt.Errorf("failed to read system.md: %w", err)
 	}
 	pattern.SystemMD = string(systemContent)
+	log.Printf("LoadPattern: Successfully read system.md (%d bytes)", len(systemContent))
 
 	// Try to load user.md (optional)
 	userPath := filepath.Join(pl.PatternsDir, patternID, "user.md")
 	userContent, err := os.ReadFile(userPath)
 	if err == nil {
 		pattern.UserMD = string(userContent)
+		log.Printf("LoadPattern: Successfully read user.md (%d bytes)", len(userContent))
+	} else {
+		log.Printf("LoadPattern: No user.md found (or error: %v)", err)
 	}
 
 	// Add description and tags from pattern_descriptions.json if available
 	if desc, ok := pl.descriptionsByName[patternID]; ok {
 		pattern.Description = desc.Description
 		pattern.Tags = desc.Tags
+		log.Printf("LoadPattern: Found description in JSON: %s", pattern.Description[:min(30, len(pattern.Description))])
 	} else {
 		// Fallback: derive description from first line of system.md
 		pattern.Description = deriveDescription(pattern.SystemMD)
+		log.Printf("LoadPattern: Derived description: %s", pattern.Description[:min(30, len(pattern.Description))])
 	}
 
+	log.Printf("LoadPattern: Successfully loaded pattern %s", patternID)
 	return pattern, nil
 }
 
 // Helper functions
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 // formatPatternName converts pattern ID to a more readable display name
 func formatPatternName(id string) string {

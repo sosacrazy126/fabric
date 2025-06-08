@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -40,6 +41,16 @@ func NewFabricApp() (*FabricApp, error) {
 	// Initialize Fyne app
 	a := app.New()
 	win := a.NewWindow("Fabric GUI")
+	
+	// In a real implementation, set the application icon
+	// This would be done with an imported resource from assets.go
+	// a.SetIcon(appIcon)
+	
+	// Check if we should skip pattern loading (faster startup for testing)
+	skipPatternLoading := os.Getenv("FABRIC_GUI_SKIP_PATTERNS") == "1"
+	if skipPatternLoading {
+		log.Println("FABRIC_GUI_SKIP_PATTERNS=1, skipping pattern loading")
+	}
 
 	// Locate Fabric data directory
 	fabricDataDir, err := getFabricDataDir()
@@ -58,9 +69,25 @@ func NewFabricApp() (*FabricApp, error) {
 		state:         &AppState{},
 	}
 
-	// Load patterns
-	if err := app.loadPatterns(); err != nil {
-		return nil, fmt.Errorf("failed to load patterns: %w", err)
+	// Load patterns (unless skipped)
+	if !skipPatternLoading {
+		if err := app.loadPatterns(); err != nil {
+			log.Printf("Warning: failed to load patterns: %v", err)
+			// Continue anyway with an empty pattern list
+			app.state.LoadedPatterns = []Pattern{}
+		}
+	} else {
+		// Create a simple test pattern for the UI
+		app.state.LoadedPatterns = []Pattern{
+			{
+				ID:          "test_pattern",
+				Name:        "Test Pattern",
+				Description: "A test pattern for demonstration",
+				SystemMD:    "# Test Pattern\n\nThis is a test pattern.",
+				UserMD:      "",
+				Tags:        []string{"test"},
+			},
+		}
 	}
 
 	// Initialize UI components
@@ -70,18 +97,44 @@ func NewFabricApp() (*FabricApp, error) {
 
 // loadPatterns loads all patterns using the patternLoader
 func (app *FabricApp) loadPatterns() error {
-	patterns, err := app.patternLoader.LoadAllPatterns()
-	if err != nil {
+	log.Println("Loading patterns...")
+	
+	// Use a timeout mechanism to prevent hanging indefinitely
+	patternsChan := make(chan []Pattern, 1)
+	errChan := make(chan error, 1)
+	
+	go func() {
+		patterns, err := app.patternLoader.LoadAllPatterns()
+		if err != nil {
+			errChan <- err
+			return
+		}
+		patternsChan <- patterns
+	}()
+	
+	// Wait for patterns or timeout
+	select {
+	case patterns := <-patternsChan:
+		log.Printf("Loaded %d patterns successfully", len(patterns))
+		
+		// Sort patterns by name for better UX
+		sort.Slice(patterns, func(i, j int) bool {
+			return patterns[i].Name < patterns[j].Name
+		})
+		
+		app.state.LoadedPatterns = patterns
+		return nil
+		
+	case err := <-errChan:
+		log.Printf("Error loading patterns: %v", err)
 		return err
+		
+	case <-time.After(10 * time.Second):
+		log.Println("Pattern loading timed out after 10 seconds")
+		// Create an empty pattern list so the UI can still load
+		app.state.LoadedPatterns = []Pattern{}
+		return fmt.Errorf("pattern loading timed out")
 	}
-
-	// Sort patterns by name for better UX
-	sort.Slice(patterns, func(i, j int) bool {
-		return patterns[i].Name < patterns[j].Name
-	})
-
-	app.state.LoadedPatterns = patterns
-	return nil
 }
 
 // setupUI initializes all UI components
@@ -96,6 +149,21 @@ func (app *FabricApp) setupUI() {
 		container.NewTabItem("Patterns", app.patterns.Container()),
 		container.NewTabItem("Execute", app.execute.Container()),
 	)
+	
+	// Set up tab change handler for clearing input/output
+	app.mainTabs.OnChanged = func(tab *container.TabItem) {
+		// When switching to Execute tab, update pattern info and run button
+		if tab.Text == "Execute" && app.state.CurrentPatternID != "" {
+			// Find selected pattern to get name
+			for _, p := range app.state.LoadedPatterns {
+				if p.ID == app.state.CurrentPatternID {
+					app.updateRunButtonText(p.Name)
+					app.execute.patternInfo.SetText(fmt.Sprintf("Selected pattern: %s", p.Name))
+					break
+				}
+			}
+		}
+	}
 
 	// Create main layout
 	mainContent := container.NewBorder(
@@ -114,34 +182,89 @@ func (app *FabricApp) Run() {
 	app.window.ShowAndRun()
 }
 
+// updateRunButtonText updates the text of the Run Pattern button in the Execute tab
+func (app *FabricApp) updateRunButtonText(patternName string) {
+	if app.execute != nil && app.execute.runBtn != nil {
+		if patternName == "" {
+			app.execute.runBtn.SetText("Run Pattern")
+			app.execute.runBtn.Importance = widget.MediumImportance
+		} else {
+			app.execute.runBtn.SetText(fmt.Sprintf("Run '%s'", patternName))
+			app.execute.runBtn.Importance = widget.HighImportance
+		}
+		app.execute.runBtn.Refresh()
+	}
+}
+
 // Helper functions
 
 // getFabricDataDir returns the location of Fabric's data directory
 func getFabricDataDir() (string, error) {
+	log.Println("Searching for Fabric data directory...")
+	
 	// First, check if we're running from within the Fabric repository
 	currentDir, err := os.Getwd()
 	if err != nil {
+		log.Printf("Error getting current directory: %v", err)
 		return "", err
 	}
+	log.Printf("Current directory: %s", currentDir)
 
-	// If we're inside the Fabric repo, use the patterns directory directly
+	// First check current directory
 	patternsDir := filepath.Join(currentDir, "patterns")
 	if _, err := os.Stat(patternsDir); err == nil {
-		log.Println("Using local Fabric data directory")
+		log.Printf("Found patterns directory at: %s", patternsDir)
 		return currentDir, nil
 	}
+	log.Printf("No patterns directory found at: %s", patternsDir)
+	
+	// Check parent directory (we might be in a subdirectory of the fabric repo)
+	parentDir := filepath.Dir(currentDir)
+	parentPatternsDir := filepath.Join(parentDir, "patterns")
+	if _, err := os.Stat(parentPatternsDir); err == nil {
+		log.Printf("Found patterns directory at: %s", parentPatternsDir)
+		return parentDir, nil
+	}
+	log.Printf("No patterns directory found at: %s", parentPatternsDir)
 
-	// Otherwise, check ~/.config/fabric
+	// Check ~/.config/fabric
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
+		log.Printf("Error getting home directory: %v", err)
 		return "", fmt.Errorf("couldn't determine user home directory: %w", err)
 	}
 
 	configDir := filepath.Join(homeDir, ".config", "fabric")
 	if _, err := os.Stat(configDir); err == nil {
-		log.Println("Using ~/.config/fabric data directory")
+		log.Printf("Found config directory at: %s", configDir)
 		return configDir, nil
 	}
+	log.Printf("No config directory found at: %s", configDir)
 
-	return "", fmt.Errorf("couldn't locate Fabric data directory")
+	// As a fallback, create a minimal patterns directory in the current location
+	log.Println("No Fabric data directory found, creating a minimal one in current directory")
+	err = os.MkdirAll(patternsDir, 0755)
+	if err != nil {
+		log.Printf("Error creating patterns directory: %v", err)
+		return "", fmt.Errorf("couldn't create patterns directory: %w", err)
+	}
+	
+	// Create a simple test pattern
+	testPatternDir := filepath.Join(patternsDir, "test_pattern")
+	err = os.MkdirAll(testPatternDir, 0755)
+	if err != nil {
+		log.Printf("Error creating test pattern directory: %v", err)
+		return "", fmt.Errorf("couldn't create test pattern directory: %w", err)
+	}
+	
+	// Create a simple system.md file
+	systemMDPath := filepath.Join(testPatternDir, "system.md")
+	err = os.WriteFile(systemMDPath, []byte("# Test Pattern\n\nThis is a test pattern created by the Fabric GUI."), 0644)
+	if err != nil {
+		log.Printf("Error creating system.md: %v", err)
+		return "", fmt.Errorf("couldn't create system.md: %w", err)
+	}
+	
+	log.Println("Created minimal Fabric data directory with test pattern")
+	return currentDir, nil
 }
