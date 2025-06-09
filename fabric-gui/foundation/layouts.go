@@ -100,13 +100,10 @@ type SidebarPanel struct {
     patternSection *CollapsibleSection // Collapsible patterns section
 
     // Model Provider
-    modelSelect  *widget.Select
-    vendorSelect *widget.Select
-    modelSection *CollapsibleSection // Collapsible model section
+    modelProvider *ModelProviderPanel
     
     // Parameter Settings
     parameterSection *CollapsibleSection // Collapsible parameters section
-    // paramSliders map[string]*widget.Slider // E.g., Temperature, TopP etc.
 }
 
 // NewSidebarPanel creates a new sidebar panel.
@@ -151,179 +148,64 @@ func NewSidebarPanel(app *FabricApp) *SidebarPanel {
             // Update item content
             if id < len(app.state.FilteredPatterns) {
                 pattern := app.state.FilteredPatterns[id]
-                itemContainer := obj.(*fyne.Container)
-                nameLabel := itemContainer.Objects[0].(*widget.Label)
-                descLabel := itemContainer.Objects[1].(*widget.Label)
+                
+                // Get the labels from the container
+                vbox := obj.(*fyne.Container)
+                nameLabel := vbox.Objects[0].(*widget.Label)
+                descLabel := vbox.Objects[1].(*widget.Label)
+                
+                // Update labels
                 nameLabel.SetText(pattern.Name)
-                descLabel.SetText(getShortDescription(pattern))
+                
+                // Truncate description if too long
+                desc := pattern.Description
+                if len(desc) > 80 {
+                    desc = desc[:77] + "..."
+                }
+                descLabel.SetText(desc)
             }
         },
     )
+    
+    // Set up pattern selection handler
     sb.patternList.OnSelected = func(id widget.ListItemID) {
         if id < len(app.state.FilteredPatterns) {
-            selectedPattern := app.state.FilteredPatterns[id]
-            app.state.CurrentPatternID = selectedPattern.ID
+            pattern := app.state.FilteredPatterns[id]
             
-            // Add to recent patterns list (for history)
-            addToRecentPatterns(app, selectedPattern.ID)
+            // Update app state with selected pattern
+            app.state.CurrentPatternID = pattern.ID
             
-            // Update Pattern Info tab in main content area
-            app.mainLayout.MainContent.patternInfoArea.SetPattern(selectedPattern)
+            // Update UI to show pattern is selected
+            app.mainLayout.MainContent.patternInfoArea.UpdateInfo(
+                pattern.Name,
+                app.state.CurrentModelName,
+                app.state.CurrentVendorID,
+            )
             
-            // Update Run button in Execute tab
-            app.mainLayout.MainContent.UpdateRunButton(selectedPattern.Name)
-            app.ShowMessage(fmt.Sprintf("Selected pattern: %s", selectedPattern.Name))
-        }
-    }
-
-    // Initialize model select with a placeholder
-    sb.modelSelect = widget.NewSelect([]string{"Loading models..."}, nil)
-    
-    // Populate with models if available
-    if len(app.state.LoadedVendors) > 0 && app.state.CurrentVendorID != "" {
-        // Get models for the current vendor
-        if models, ok := app.state.LoadedModels[app.state.CurrentVendorID]; ok && len(models) > 0 {
-            // Sort models alphabetically
-            sortedModels := make([]string, len(models))
-            copy(sortedModels, models)
-            sort.Strings(sortedModels)
+            // Update run button with pattern name
+            app.mainLayout.MainContent.UpdateRunButton(pattern.Name)
             
-            sb.modelSelect.Options = sortedModels
-        } else {
-            // No models available for this vendor
-            sb.modelSelect.Options = []string{"No models available"}
-        }
-    } else {
-        // No vendors loaded
-        sb.modelSelect.Options = []string{"No models available"}
-    }
-    
-    // Set handler for model selection
-    sb.modelSelect.OnChanged = func(selected string) {
-        // Skip if it's our placeholder text
-        if selected == "No models available" || selected == "Loading models..." {
-            return
-        }
-        
-        app.state.CurrentModelID = selected
-        app.state.CurrentModelName = selected // Simplify for now, could look up friendly name
-        
-        // Save to config
-        if app.fabricConfig != nil {
-            app.fabricConfig.SetConfig("DEFAULT_MODEL", selected)
-            app.fabricConfig.SaveEnvConfig()
-        }
-        
-        app.ShowMessage(fmt.Sprintf("Selected model: %s", selected))
-    }
-    
-    // Set initial selection if we have a current model
-    if app.state.CurrentModelID != "" && contains(sb.modelSelect.Options, app.state.CurrentModelID) {
-        sb.modelSelect.SetSelected(app.state.CurrentModelID)
-    } else if len(sb.modelSelect.Options) > 0 && sb.modelSelect.Options[0] != "No models available" && sb.modelSelect.Options[0] != "Loading models..." {
-        // Default to first model if current one not found
-        sb.modelSelect.SetSelected(sb.modelSelect.Options[0])
-        app.state.CurrentModelID = sb.modelSelect.Options[0]
-    }
-    
-    // Create vendor select with better UI
-    sb.vendorSelect = widget.NewSelect([]string{"Loading vendors..."}, nil)
-    
-    // If we have vendors loaded, populate the vendor select
-    if len(app.state.LoadedVendors) > 0 {
-        // Sort vendors alphabetically for better UX
-        vendorList := make([]string, len(app.state.LoadedVendors))
-        copy(vendorList, app.state.LoadedVendors)
-        sort.Strings(vendorList)
-        
-        sb.vendorSelect.Options = vendorList
-        
-        // Set handler for vendor selection with improved UI feedback
-        sb.vendorSelect.OnChanged = func(selected string) {
-            app.state.CurrentVendorID = selected
-            
-            // Show loading indicator in model dropdown
-            loadingText := "Loading models..."
-            sb.modelSelect.Options = []string{loadingText}
-            sb.modelSelect.SetSelected(loadingText)
-            sb.modelSelect.Refresh()
-            
-            // Expand the model section if it was collapsed
-            if sb.modelSection != nil && !sb.modelSection.IsExpanded {
-                sb.modelSection.SetExpanded(true)
+            // Switch to Execute tab if not already there
+            if app.state.LastActiveTab != "Execute" {
+                app.mainLayout.MainContent.tabs.Select(0) // Execute tab
             }
             
-            // Save vendor to config
-            if app.fabricConfig != nil {
-                app.fabricConfig.SetConfig("DEFAULT_VENDOR", selected)
-                app.fabricConfig.SaveEnvConfig()
-            }
+            // Show message
+            app.ShowMessage(fmt.Sprintf("Selected pattern: %s", pattern.Name))
             
-            app.ShowMessage(fmt.Sprintf("Selected vendor: %s", selected))
-            
-            // Load models for this vendor asynchronously to avoid UI freezing
+            // Deselect after a moment (visual feedback but don't stay highlighted)
             go func() {
-                err := app.loadModelsForVendor(selected)
-                
-                // Update UI on the main thread to avoid concurrency issues
-                // Update on the main thread using a simplified approach
-                app.window.Canvas().Refresh(sb.modelSelect) // Force refresh the model select
-                
-                // Process results
-                if err != nil {
-                    // Show error in model dropdown
-                    sb.modelSelect.Options = []string{"Error loading models"}
-                    sb.modelSelect.SetSelected("Error loading models")
-                    sb.modelSelect.Refresh()
-                    app.ShowMessage(fmt.Sprintf("Error loading models for %s", selected))
-                } else {
-                    // Get the models
-                    models, ok := app.state.LoadedModels[selected]
-                    if !ok || len(models) == 0 {
-                        // No models available
-                        sb.modelSelect.Options = []string{"No models available"}
-                        sb.modelSelect.SetSelected("No models available")
-                        sb.modelSelect.Refresh()
-                        app.ShowMessage(fmt.Sprintf("No models available for %s", selected))
-                    } else {
-                        // Sort models alphabetically
-                        sortedModels := make([]string, len(models))
-                        copy(sortedModels, models)
-                        sort.Strings(sortedModels)
-                        
-                        // Update dropdown
-                        sb.modelSelect.Options = sortedModels
-                        if len(sortedModels) > 0 {
-                            sb.modelSelect.SetSelected(sortedModels[0])
-                            app.state.CurrentModelID = sortedModels[0]
-                        }
-                        sb.modelSelect.Refresh()
-                        app.ShowMessage(fmt.Sprintf("Loaded %d models for %s", len(models), selected))
-                    }
-                }
+                time.Sleep(100 * time.Millisecond)
+                app.mainWindow.Canvas().Focus(nil) // Remove focus
             }()
         }
-        
-        // Set initial selection if we have a current vendor
-        if app.state.CurrentVendorID != "" && contains(vendorList, app.state.CurrentVendorID) {
-            sb.vendorSelect.SetSelected(app.state.CurrentVendorID)
-        } else if len(vendorList) > 0 {
-            // Default to first vendor if current one not found
-            sb.vendorSelect.SetSelected(vendorList[0])
-            app.state.CurrentVendorID = vendorList[0]
-        }
-    } else {
-        // No vendors loaded, show a message
-        sb.vendorSelect.Options = []string{"No vendors available"}
-        sb.vendorSelect.SetSelected("No vendors available")
     }
 
-        // Initialize collapsible sections - we'll populate them later
-    sb.patternSection = nil
-    sb.modelSection = nil
-    sb.parameterSection = nil
-    
-        // Create pattern section with search and filter controls
+    // Create model provider panel (handles all model/vendor selection)
+    sb.modelProvider = NewModelProviderPanel(app)
+
+    // Initialize collapsible sections
+    // Create pattern section with search and filter controls
     patternControls := container.NewVBox(
         widget.NewLabel("Search:"),
         sb.searchEntry,
@@ -334,16 +216,6 @@ func NewSidebarPanel(app *FabricApp) *SidebarPanel {
     )
     sb.patternSection = NewCollapsibleSection("Patterns", patternControls)
     sb.patternSection.SetExpanded(true) // Start expanded by default
-    
-    // Create model provider card
-    modelProviderContent := container.NewVBox(
-        widget.NewLabel("Provider:"),
-        sb.vendorSelect,
-        widget.NewSeparator(),
-        widget.NewLabel("Model:"),
-        sb.modelSelect,
-    )
-    sb.modelSection = NewCollapsibleSection("AI Model", modelProviderContent)
     
     // Create parameter settings section (placeholder for now)
     paramControls := container.NewVBox(
@@ -357,7 +229,7 @@ func NewSidebarPanel(app *FabricApp) *SidebarPanel {
         widget.NewSeparator(),
         sb.patternSection,
         widget.NewSeparator(),
-        sb.modelSection,
+        sb.modelProvider.Container(), // Use the ModelProviderPanel container
         widget.NewSeparator(),
         sb.parameterSection,
     )
@@ -379,46 +251,58 @@ func (sb *SidebarPanel) Container() fyne.CanvasObject {
     return sb.container
 }
 
-// Helper function to get short description
-func getShortDescription(pattern Pattern) string {
-    desc := pattern.Description
-    if len(desc) > 60 {
-        return desc[:57] + "..."
+// extractTagOptions builds a list of unique tags from patterns
+func extractTagOptions(patterns []Pattern) []string {
+    // Start with "All" option
+    options := []string{"All"}
+    
+    // Create a map to track unique tags
+    tagMap := make(map[string]bool)
+    
+    // Extract tags from all patterns
+    for _, pattern := range patterns {
+        for _, tag := range pattern.Tags {
+            tagMap[tag] = true
+        }
     }
-    return desc
+    
+    // Convert map keys to slice
+    for tag := range tagMap {
+        options = append(options, tag)
+    }
+    
+    // Sort options for better UX (keep "All" at the beginning)
+    sort.Slice(options[1:], func(i, j int) bool {
+        return strings.ToLower(options[i+1]) < strings.ToLower(options[j+1])
+    })
+    
+    return options
 }
 
-// Filter patterns based on search text and selected filter
+// filterPatterns applies current search query and tag filters
 func filterPatterns(app *FabricApp) {
-    searchText := app.state.SearchQuery
-    selectedTags := app.state.SelectedTags
+    // Start with all patterns
+    filteredPatterns := make([]Pattern, 0)
     
-    // If no filter, show all patterns
-    if searchText == "" && (selectedTags == nil || len(selectedTags) == 0) {
-        app.state.FilteredPatterns = make([]Pattern, len(app.state.LoadedPatterns))
-        copy(app.state.FilteredPatterns, app.state.LoadedPatterns)
-        // Only refresh if mainLayout and Sidebar are initialized
-        if app.mainLayout != nil && app.mainLayout.Sidebar != nil && app.mainLayout.Sidebar.patternList != nil {
-            app.mainLayout.Sidebar.patternList.Refresh()
+    // Filter by search query
+    searchQuery := strings.ToLower(app.state.SearchQuery)
+    
+    for _, pattern := range app.state.LoadedPatterns {
+        // Skip if doesn't match search query
+        if searchQuery != "" {
+            nameMatch := strings.Contains(strings.ToLower(pattern.Name), searchQuery)
+            descMatch := strings.Contains(strings.ToLower(pattern.Description), searchQuery)
+            
+            if !nameMatch && !descMatch {
+                continue
+            }
         }
-        return
-    }
-    
-    // Apply filters
-    filtered := []Pattern{}
-    searchLower := strings.ToLower(searchText)
-    
-    for _, p := range app.state.LoadedPatterns {
-        // Check search text
-        nameMatch := searchText == "" || strings.Contains(strings.ToLower(p.Name), searchLower)
-        descMatch := searchText == "" || strings.Contains(strings.ToLower(p.Description), searchLower)
-        systemMatch := searchText == "" || strings.Contains(strings.ToLower(p.SystemMD), searchLower)
         
-        // Check tag filter
-        tagMatch := selectedTags == nil || len(selectedTags) == 0
-        if !tagMatch && len(p.Tags) > 0 {
-            for _, selectedTag := range selectedTags {
-                for _, patternTag := range p.Tags {
+        // Skip if doesn't match tag filter
+        if len(app.state.SelectedTags) > 0 {
+            tagMatch := false
+            for _, selectedTag := range app.state.SelectedTags {
+                for _, patternTag := range pattern.Tags {
                     if patternTag == selectedTag {
                         tagMatch = true
                         break
@@ -428,360 +312,282 @@ func filterPatterns(app *FabricApp) {
                     break
                 }
             }
+            
+            if !tagMatch {
+                continue
+            }
         }
         
-        // Add pattern if it matches all filters
-        if (nameMatch || descMatch || systemMatch) && tagMatch {
-            filtered = append(filtered, p)
-        }
+        // Pattern passed all filters
+        filteredPatterns = append(filteredPatterns, pattern)
     }
     
-    app.state.FilteredPatterns = filtered
+    // Update app state
+    app.state.FilteredPatterns = filteredPatterns
     
-    // Only refresh if mainLayout and Sidebar are initialized
-    if app.mainLayout != nil && app.mainLayout.Sidebar != nil && app.mainLayout.Sidebar.patternList != nil {
+    // Refresh pattern list UI
+    if app.mainLayout != nil && app.mainLayout.Sidebar != nil {
         app.mainLayout.Sidebar.patternList.Refresh()
-        
-        // Update status
-        if len(filtered) == 0 {
-            app.ShowMessage("No patterns match the current filters")
-        } else {
-            app.ShowMessage(fmt.Sprintf("Showing %d/%d patterns", len(filtered), len(app.state.LoadedPatterns)))
-        }
     }
 }
 
-// extractTagOptions builds a list of tag options from loaded patterns
-func extractTagOptions(patterns []Pattern) []string {
-    // Use a map to deduplicate tags
-    tagMap := make(map[string]bool)
-    tagMap["All"] = true // Always include "All" option
-    
-    for _, pattern := range patterns {
-        for _, tag := range pattern.Tags {
-            if tag != "" { // Skip empty tags
-                tagMap[tag] = true
-            }
-        }
-    }
-    
-    // Convert map to sorted slice
-    tags := make([]string, 0, len(tagMap))
-    for tag := range tagMap {
-        tags = append(tags, tag)
-    }
-    
-    // Sort tags (with "All" at the front)
-    sort.Slice(tags, func(i, j int) bool {
-        if tags[i] == "All" {
-            return true
-        }
-        if tags[j] == "All" {
-            return false
-        }
-        return tags[i] < tags[j]
-    })
-    
-    return tags
-}
-
-// addToRecentPatterns adds a pattern ID to the recent patterns list
-func addToRecentPatterns(app *FabricApp, patternID string) {
-    // Check if already in list
-    for i, id := range app.state.LastUsedPatterns {
-        if id == patternID {
-            // If already at front, do nothing
-            if i == 0 {
-                return
-            }
-            // Remove from current position
-            app.state.LastUsedPatterns = append(app.state.LastUsedPatterns[:i], app.state.LastUsedPatterns[i+1:]...)
-            break
-        }
-    }
-    
-    // Add to front of list
-    app.state.LastUsedPatterns = append([]string{patternID}, app.state.LastUsedPatterns...)
-    
-    // Limit list size to 10
-    if len(app.state.LastUsedPatterns) > 10 {
-        app.state.LastUsedPatterns = app.state.LastUsedPatterns[:10]
-    }
-}
-
-// MainContentPanel mirrors Streamlit's main content area with tabs for Input, Output, and Pattern Info.
+// MainContentPanel manages the main content area with tabs.
 type MainContentPanel struct {
     app *FabricApp // Reference to the main app
 
     container *fyne.Container
     tabs      *container.AppTabs
-
-    // Sub-panels for each tab's content
+    
+    // Tab content panels
     inputArea       *InputArea
     outputArea      *OutputArea
     patternInfoArea *PatternInfoArea
-
-    // Directly accessible widgets from the Execute context
+    
+    // Action buttons
     runButton *widget.Button
 }
 
-// NewMainContentPanel creates a new main content panel.
+// NewMainContentPanel creates a new main content panel with tabs.
 func NewMainContentPanel(app *FabricApp) *MainContentPanel {
-    mcp := &MainContentPanel{app: app}
-
-    // Create sub-areas
-    mcp.inputArea = NewInputArea(app)
-    mcp.outputArea = NewOutputArea(app)
-    mcp.patternInfoArea = NewPatternInfoArea(app)
-
-    // Create Run button (now placed here for global access)
-    mcp.runButton = widget.NewButtonWithIcon("Run Pattern", theme.MediaPlayIcon(), func() {
-        mcp.executePattern() // Call the execution logic
+    mc := &MainContentPanel{app: app}
+    
+    // Create input area (for Execute tab)
+    mc.inputArea = NewInputArea(app)
+    
+    // Create output area (for Results tab)
+    mc.outputArea = NewOutputArea(app)
+    
+    // Create pattern info area (for Pattern Details tab)
+    mc.patternInfoArea = NewPatternInfoArea(app)
+    
+    // Create run button
+    mc.runButton = widget.NewButton("Run Pattern", func() {
+        mc.executePattern()
     })
-    mcp.runButton.Importance = widget.MediumImportance
-
-    // Create tabs for main content with workflow-oriented names
-    mcp.tabs = container.NewAppTabs(
-        container.NewTabItem("Execute", mcp.inputArea.Container()),
-        container.NewTabItem("Results", mcp.outputArea.Container()),
-        container.NewTabItem("Pattern Details", mcp.patternInfoArea.Container()),
+    mc.runButton.Importance = widget.HighImportance
+    mc.runButton.Disable() // Disabled until pattern is selected
+    
+    // Create Execute tab with input area and run button
+    executeContent := container.NewBorder(
+        nil,                  // Top
+        container.NewVBox(    // Bottom
+            widget.NewSeparator(),
+            container.NewHBox(
+                mc.runButton,
+                widget.NewLabel(""), // Spacer
+            ),
+        ),
+        nil, nil,             // Left, Right
+        mc.inputArea.Container(), // Center
     )
-    mcp.tabs.SetTabLocation(container.TabLocationTop)
-
-    // Main layout assembly: Run button at top, tabs in center
-    mcp.container = container.NewBorder(
-        container.NewVBox(mcp.runButton), // Top section with the run button
-        nil,                          // Bottom
-        nil, nil,                     // Left, Right
-        mcp.tabs,                     // Center: the tabbed content
+    
+    // Create tabs
+    mc.tabs = container.NewAppTabs(
+        container.NewTabItem("Execute", executeContent),
+        container.NewTabItem("Results", mc.outputArea.Container()),
+        container.NewTabItem("Pattern Details", mc.patternInfoArea.Container()),
     )
-    return mcp
+    
+    // Set initial tab
+    mc.tabs.SetTabLocation(container.TabLocationTop)
+    
+    // Create main container
+    mc.container = container.NewMax(mc.tabs)
+    
+    return mc
 }
 
 // Container returns the root Fyne container for the MainContentPanel.
-func (mcp *MainContentPanel) Container() fyne.CanvasObject {
-    return mcp.container
+func (mc *MainContentPanel) Container() fyne.CanvasObject {
+    return mc.container
 }
 
-// UpdateRunButton updates the text of the main Run button.
-func (mcp *MainContentPanel) UpdateRunButton(patternName string) {
+// UpdateRunButton updates the run button text and state based on pattern selection.
+func (mc *MainContentPanel) UpdateRunButton(patternName string) {
     if patternName == "" {
-        mcp.runButton.SetText("Run Pattern")
-        mcp.runButton.Importance = widget.MediumImportance
+        mc.runButton.SetText("Run Pattern")
+        mc.runButton.Disable()
     } else {
-        mcp.runButton.SetText(fmt.Sprintf("Run '%s'", patternName))
-        mcp.runButton.Importance = widget.HighImportance
+        mc.runButton.SetText(fmt.Sprintf("Run '%s'", patternName))
+        mc.runButton.Enable()
     }
-    mcp.runButton.Refresh()
 }
 
-// executePattern is the core logic for running a pattern.
-func (mcp *MainContentPanel) executePattern() {
-    // Validate pattern selection
-    if mcp.app.state.CurrentPatternID == "" {
-        mcp.app.ShowError(fmt.Errorf("no pattern selected"))
+// executePattern runs the currently selected pattern.
+func (mc *MainContentPanel) executePattern() {
+    // Get current pattern and input
+    patternID := mc.app.state.CurrentPatternID
+    if patternID == "" {
+        mc.app.ShowError("No pattern selected")
         return
     }
-
-    // Get input text based on selected input source
-    var input string
-    switch mcp.app.state.InputSourceType {
-    case "Text":
-        input = mcp.inputArea.inputEntry.Text
-    case "URL":
-        input = mcp.inputArea.urlEntry.Text
-    // Other input types will be handled here
-    default:
-        input = mcp.inputArea.inputEntry.Text
-    }
     
+    // Get input text
+    input := mc.inputArea.GetInput()
     if input == "" {
-        mcp.app.ShowError(fmt.Errorf("no input provided"))
+        mc.app.ShowError("Input is empty")
         return
     }
-
-    // Save current input to state
-    mcp.app.state.CurrentInputText = input
     
-    // Update UI to show execution is in progress
-    mcp.app.ShowMessage("Executing pattern: " + mcp.app.state.CurrentPatternID)
-    mcp.runButton.Disable() // Disable button during execution
-    mcp.outputArea.outputEntry.SetText("Thinking...") // Clear previous output and show feedback
+    // Get current model and vendor
+    modelID := mc.app.state.CurrentModelID
+    vendorID := mc.app.state.CurrentVendorID
     
-    // Build execution configuration from app state
-    config := ExecutionConfig{
-        PatternID:        mcp.app.state.CurrentPatternID,
-        Input:            input,
-        Model:            mcp.app.state.CurrentModelID,
-        Vendor:           mcp.app.state.CurrentVendorID,
-        Temperature:      mcp.app.state.Temperature,
-        TopP:             mcp.app.state.TopP,
-        PresencePenalty:  mcp.app.state.PresencePenalty,
-        FrequencyPenalty: mcp.app.state.FrequencyPenalty,
-        Seed:             mcp.app.state.Seed,
-        ContextLength:    mcp.app.state.ContextLength,
-        Strategy:         mcp.app.state.Strategy,
-        Stream:           false, // Don't stream by default
-        DryRun:           false, // Don't use dry run by default
+    if modelID == "" || vendorID == "" {
+        mc.app.ShowError("No model or vendor selected")
+        return
     }
     
-    // Execute in goroutine to avoid blocking UI
+    // Show execution in progress
+    mc.runButton.Disable()
+    mc.runButton.SetText("Executing...")
+    mc.app.StatusBar.ShowMessage("Executing pattern...")
+    
+    // Execute pattern asynchronously
     go func() {
-        // Ensure the button is re-enabled when execution completes
-        defer func() {
-            mcp.runButton.Enable()
-            mcp.runButton.Refresh()
-        }()
+        // Get pattern by ID
+        var pattern Pattern
+        found := false
+        for _, p := range mc.app.state.LoadedPatterns {
+            if p.ID == patternID {
+                pattern = p
+                found = true
+                break
+            }
+        }
         
-        // Execute the pattern
-        result, err := mcp.app.executePattern(config)
-        if err != nil {
-            mcp.app.ShowError(fmt.Errorf("execution failed: %v", err))
-            mcp.outputArea.outputEntry.SetText(fmt.Sprintf("Error: %v", err))
+        if !found {
+            mc.app.ShowError("Pattern not found")
+            mc.runButton.Enable()
+            mc.runButton.SetText(fmt.Sprintf("Run '%s'", mc.app.getPatternNameByID(patternID)))
             return
         }
         
-        // Display the result
-        mcp.outputArea.outputEntry.SetText(result.Output)
-        mcp.app.state.LastOutput = result.Output
+        // Create execution manager
+        execManager := NewExecutionManager(mc.app.fabricConfig)
         
-        // Update status with execution info
-        mcp.app.ShowMessage(fmt.Sprintf("Pattern executed in %.2f seconds", 
-            result.ExecutionTime.Seconds()))
+        // Execute pattern
+        result, err := execManager.ExecutePattern(pattern, input, modelID, vendorID)
         
-        // Save execution to history
-        mcp.app.state.LastRun = result.Timestamp
-        
-        // Automatically switch to Results tab after execution
-        mcp.tabs.SelectIndex(1) // Results tab is index 1
-        
-        // Update output info with execution timestamp
-        mcp.outputArea.outputInfo.SetText(fmt.Sprintf(
-            "Executed at: %s - Time: %.2f seconds", 
-            result.Timestamp.Format("Jan 2, 2006 15:04:05"),
-            result.ExecutionTime.Seconds()))
+        // Update UI on main thread
+        fyne.CurrentApp().Driver().RunOnMain(func() {
+            if err != nil {
+                mc.app.ShowError(fmt.Sprintf("Execution failed: %v", err))
+                mc.outputArea.SetOutput("Execution failed: " + err.Error())
+            } else {
+                // Update output area
+                mc.outputArea.SetOutput(result)
+                
+                // Update state
+                mc.app.state.LastOutput = result
+                mc.app.state.LastRun = time.Now()
+                
+                // Show success message
+                mc.app.StatusBar.ShowMessage("Execution completed successfully")
+                
+                // Switch to Results tab
+                mc.tabs.Select(1) // Results tab
+            }
+            
+            // Re-enable run button
+            mc.runButton.Enable()
+            mc.runButton.SetText(fmt.Sprintf("Run '%s'", pattern.Name))
+        })
     }()
 }
 
-// StatusBar shows application status.
-type StatusBar struct {
-    content *widget.Label
-}
-
-// NewStatusBar creates a new status bar.
-func NewStatusBar() *StatusBar {
-    return &StatusBar{
-        content: widget.NewLabel("Ready"),
-    }
-}
-
-// Container returns the status bar content
-func (s *StatusBar) Container() fyne.CanvasObject {
-    return s.content
-}
-
-// ShowError displays an error message.
-func (s *StatusBar) ShowError(err error) {
-    s.content.SetText("Error: " + err.Error())
-    s.content.Refresh() // Ensure update is drawn
-}
-
-// ShowMessage displays a status message.
-func (s *StatusBar) ShowMessage(msg string) {
-    s.content.SetText(msg)
-    s.content.Refresh() // Ensure update is drawn
-}
-
-// InputArea represents the input section.
+// InputArea manages the input area for pattern execution.
 type InputArea struct {
     app *FabricApp // Reference to the main app
 
     container *fyne.Container
-    // Main input widgets
-    sourceSelect *widget.Select // Text, Clipboard, File, URL
-    inputEntry   *widget.Entry
-    clipboardBtn *widget.Button
-    fileBtn      *widget.Button
-    urlEntry     *widget.Entry
     
-    // Input statistics and preview
+    // Input components
+    inputSource *widget.Select
+    textInput   *widget.TextArea
+    fileInput   *widget.Button
+    urlInput    *widget.Entry
+    
+    // Preview components
     previewLabel *widget.Label
-    charCountLabel *widget.Label
-    wordCountLabel *widget.Label
-    statsContainer *fyne.Container
+    previewStats *widget.Label
 }
 
 // NewInputArea creates a new input area.
 func NewInputArea(app *FabricApp) *InputArea {
     ia := &InputArea{app: app}
-
-    ia.sourceSelect = widget.NewSelect([]string{"Text", "Clipboard", "File", "URL"}, nil) // OnChanged set later
-    ia.inputEntry = widget.NewMultiLineEntry()
-    ia.inputEntry.SetPlaceHolder("Enter your input here...")
-    ia.inputEntry.SetMinRowsVisible(8)
     
-    // Add text change listener to update statistics
-    ia.inputEntry.OnChanged = func(text string) {
-        ia.updateTextStatistics(text)
+    // Create input source selector
+    ia.inputSource = widget.NewSelect([]string{"Text", "File", "URL"}, func(selected string) {
+        ia.updateInputSource(selected)
+    })
+    ia.inputSource.SetSelected("Text")
+    
+    // Create text input
+    ia.textInput = widget.NewMultiLineEntry()
+    ia.textInput.SetPlaceHolder("Enter text here...")
+    ia.textInput.OnChanged = func(text string) {
+        ia.updatePreview()
     }
-
-    // Setup clipboard paste button with proper action
-    ia.clipboardBtn = widget.NewButton("Paste from Clipboard", func() {
-        // This would need OS-specific clipboard implementation
-        // For now just a placeholder
-        ia.app.ShowMessage("Clipboard paste not implemented yet")
+    
+    // Create file input button
+    ia.fileInput = widget.NewButton("Select File", func() {
+        dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
+            if err != nil {
+                app.ShowError(fmt.Sprintf("Error opening file: %v", err))
+                return
+            }
+            if reader == nil {
+                return // User cancelled
+            }
+            
+            // TODO: Read file content
+            // For now, just show filename
+            ia.textInput.SetText(fmt.Sprintf("File: %s", reader.URI().Name()))
+            ia.updatePreview()
+        }, app.mainWindow)
     })
+    ia.fileInput.Hide() // Hidden initially
     
-    ia.fileBtn = widget.NewButton("Choose File...", func() {
-        // This would open a file dialog
-        // For now just a placeholder
-        ia.app.ShowMessage("File selection not implemented yet")
-    })
+    // Create URL input
+    ia.urlInput = widget.NewEntry()
+    ia.urlInput.SetPlaceHolder("Enter URL here...")
+    ia.urlInput.OnChanged = func(url string) {
+        ia.updatePreview()
+    }
+    ia.urlInput.Hide() // Hidden initially
     
-    ia.urlEntry = widget.NewEntry()
-    ia.urlEntry.SetPlaceHolder("Enter URL here...")
-
-    // Create stats display area
-    ia.previewLabel = widget.NewLabelWithStyle("Input Preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-    ia.charCountLabel = widget.NewLabel("Characters: 0")
-    ia.wordCountLabel = widget.NewLabel("Words: 0")
+    // Create preview components
+    ia.previewLabel = widget.NewLabel("Input Preview")
+    ia.previewStats = widget.NewLabel("Characters: 0  Words: 0")
     
-    statsBox := container.NewHBox(
-        ia.charCountLabel,
+    // Create input source section
+    inputSourceSection := container.NewVBox(
+        widget.NewLabel("Input Source:"),
+        ia.inputSource,
+    )
+    
+    // Create input content section
+    inputContentSection := container.NewVBox(
+        ia.textInput,
+        ia.fileInput,
+        ia.urlInput,
+    )
+    
+    // Create preview section
+    previewSection := container.NewVBox(
         widget.NewSeparator(),
-        ia.wordCountLabel,
+        widget.NewLabelWithStyle("Input Preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+        ia.previewStats,
     )
     
-    ia.statsContainer = container.NewVBox(
-        ia.previewLabel,
-        statsBox,
-    )
-    
-    // Initial visibility controlled by updateInputSource
-    ia.clipboardBtn.Hide()
-    ia.fileBtn.Hide()
-    ia.urlEntry.Hide()
-
+    // Assemble the input area
     ia.container = container.NewVBox(
-        widget.NewLabelWithStyle("Input Source:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-        ia.sourceSelect,
-        widget.NewSeparator(),
-        ia.inputEntry,
-        ia.clipboardBtn,
-        ia.fileBtn,
-        ia.urlEntry,
-        widget.NewSeparator(),
-        ia.statsContainer)
-
-
-    // Set default selection and trigger initial UI update
-    ia.sourceSelect.SetSelected("Text")
-    ia.updateInputSource("Text")
-
-    ia.sourceSelect.OnChanged = func(source string) {
-        ia.updateInputSource(source)
-    }
-
+        inputSourceSection,
+        inputContentSection,
+        previewSection,
+    )
+    
     return ia
 }
 
@@ -790,133 +596,138 @@ func (ia *InputArea) Container() fyne.CanvasObject {
     return ia.container
 }
 
-// updateTextStatistics updates the character and word count statistics
-func (ia *InputArea) updateTextStatistics(text string) {
-    // Update character count
-    charCount := len(text)
-    ia.charCountLabel.SetText(fmt.Sprintf("Characters: %d", charCount))
-    
-    // Update word count (simple split by whitespace)
-    words := strings.Fields(text)
-    wordCount := len(words)
-    ia.wordCountLabel.SetText(fmt.Sprintf("Words: %d", wordCount))
-    
-    // Save to app state
-    ia.app.state.CurrentInputText = text
+// GetInput returns the current input text.
+func (ia *InputArea) GetInput() string {
+    switch ia.inputSource.Selected {
+    case "Text":
+        return ia.textInput.Text
+    case "File":
+        // TODO: Implement file reading
+        return ia.textInput.Text // For now, return placeholder
+    case "URL":
+        // TODO: Implement URL fetching
+        return ia.urlInput.Text // For now, return URL
+    default:
+        return ""
+    }
 }
 
-// updateInputSource manages the visibility of input widgets.
+// updateInputSource updates the UI based on the selected input source.
 func (ia *InputArea) updateInputSource(source string) {
-    ia.inputEntry.Hide()
-    ia.clipboardBtn.Hide()
-    ia.fileBtn.Hide()
-    ia.urlEntry.Hide()
-
+    // Hide all input components first
+    ia.textInput.Hide()
+    ia.fileInput.Hide()
+    ia.urlInput.Hide()
+    
+    // Show the selected input component
     switch source {
     case "Text":
-        ia.inputEntry.Show()
-    case "Clipboard":
-        ia.clipboardBtn.Show()
+        ia.textInput.Show()
     case "File":
-        ia.fileBtn.Show()
+        ia.fileInput.Show()
     case "URL":
-        ia.urlEntry.Show()
+        ia.urlInput.Show()
     }
-    ia.container.Refresh() // Refresh to apply visibility changes
+    
+    // Update preview
+    ia.updatePreview()
 }
 
-// OutputArea represents the output section.
+// updatePreview updates the preview stats.
+func (ia *InputArea) updatePreview() {
+    input := ia.GetInput()
+    
+    // Count characters
+    charCount := len(input)
+    
+    // Count words
+    wordCount := 0
+    if input != "" {
+        wordCount = len(strings.Fields(input))
+    }
+    
+    // Update stats label
+    ia.previewStats.SetText(fmt.Sprintf("Characters: %d  Words: %d", charCount, wordCount))
+}
+
+// OutputArea manages the output display for pattern execution results.
 type OutputArea struct {
     app *FabricApp // Reference to the main app
 
     container *fyne.Container
-    // Main output widgets
-    outputEntry *widget.Entry
-    formatSelect *widget.Select // Text, Markdown, JSON
-    copyBtn     *widget.Button
-    saveBtn     *widget.Button
-    starBtn     *widget.Button // Star/favorite this output
-    outputInfo  *widget.Label  // Shows info about pattern run
+    
+    // Output components
+    outputInfo *widget.Label
+    outputText *widget.TextArea
+    
+    // Action buttons
+    copyButton *widget.Button
+    saveButton *widget.Button
+    clearButton *widget.Button
 }
 
 // NewOutputArea creates a new output area.
 func NewOutputArea(app *FabricApp) *OutputArea {
     oa := &OutputArea{app: app}
-
-    oa.outputEntry = widget.NewMultiLineEntry()
-    oa.outputEntry.Disable()
-    oa.outputEntry.SetMinRowsVisible(10)
-    oa.outputEntry.SetPlaceHolder("AI output will appear here...")
-
-    oa.formatSelect = widget.NewSelect([]string{"Text", "Markdown", "JSON"}, nil) 
-    oa.formatSelect.SetSelected("Text")
     
-    // Add format change handler
-    oa.formatSelect.OnChanged = func(format string) {
-        // Save the format preference in app state
-        app.state.OutputFormat = format
-        oa.app.ShowMessage(fmt.Sprintf("Output format set to %s", format))
-        // Future: implement format conversion
-    }
+    // Create output info label
+    oa.outputInfo = widget.NewLabel("No output yet")
     
-    // Create info label for pattern execution metadata
-    oa.outputInfo = widget.NewLabel("Ready for execution")
-    oa.outputInfo.Importance = widget.MediumImportance
-
-    // Set up action buttons with icons
-    oa.copyBtn = widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
-        // OS-specific clipboard implementation would go here
+    // Create output text area
+    oa.outputText = widget.NewMultiLineEntry()
+    oa.outputText.SetPlaceHolder("Output will appear here...")
+    oa.outputText.Disable() // Read-only
+    
+    // Create action buttons
+    oa.copyButton = widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
+        app.mainWindow.Clipboard().SetContent(oa.outputText.Text)
         app.ShowMessage("Output copied to clipboard")
     })
     
-    oa.saveBtn = widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
-        // File save dialog would go here
-        app.ShowMessage("Save dialog not implemented yet")
+    oa.saveButton = widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
+        dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
+            if err != nil {
+                app.ShowError(fmt.Sprintf("Error saving file: %v", err))
+                return
+            }
+            if writer == nil {
+                return // User cancelled
+            }
+            
+            // Write output to file
+            _, err = writer.Write([]byte(oa.outputText.Text))
+            writer.Close()
+            
+            if err != nil {
+                app.ShowError(fmt.Sprintf("Error writing to file: %v", err))
+                return
+            }
+            
+            app.ShowMessage(fmt.Sprintf("Output saved to %s", writer.URI().Name()))
+        }, app.mainWindow)
     })
     
-    oa.starBtn = widget.NewButtonWithIcon("Favorite", theme.InfoIcon(), func() {
-        // Create custom dialog for star name
-        nameEntry := widget.NewEntry()
-        nameEntry.SetText(fmt.Sprintf("Starred Output #%d", len(app.state.StarredOutputs)+1))
-        // Select all text - calling SetText already focuses the field
-        // nameEntry.SelectAll() // This method doesn't exist in this version of Fyne
-        
-        dialog := dialog.NewForm(
-            "Save Favorite Output", 
-            "Save", "Cancel",
-            []*widget.FormItem{
-                widget.NewFormItem("Name", nameEntry),
-            },
-            func(save bool) {
-                if save {
-                    app.StarOutput(nameEntry.Text)
-                }
-            },
-            app.window)
-        dialog.Show()
+    oa.clearButton = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), func() {
+        oa.outputText.SetText("")
+        oa.outputInfo.SetText("Output cleared")
+        app.state.LastOutput = ""
     })
-
-    // Create button row with proper spacing
-    buttonRow := container.NewHBox(
-        oa.copyBtn, 
-        widget.NewSeparator(), 
-        oa.saveBtn,
-        widget.NewSeparator(),
-        oa.starBtn,
+    
+    // Create action button container
+    actionButtons := container.NewHBox(
+        oa.copyButton,
+        oa.saveButton,
+        oa.clearButton,
     )
-
-    // Assemble the container with proper sections and separators
-    oa.container = container.NewVBox(
-        widget.NewLabelWithStyle("Results", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-        oa.outputInfo,
-        widget.NewSeparator(),
-        widget.NewLabelWithStyle("Output Format:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-        oa.formatSelect,
-        widget.NewSeparator(),
-        oa.outputEntry,
-        widget.NewSeparator(),
-        buttonRow,
+    
+    // Assemble the output area
+    oa.container = container.NewBorder(
+        oa.outputInfo,        // Top
+        actionButtons,        // Bottom
+        nil, nil,             // Left, Right
+        oa.outputText,        // Center
     )
+    
     return oa
 }
 
@@ -925,76 +736,92 @@ func (oa *OutputArea) Container() fyne.CanvasObject {
     return oa.container
 }
 
-// PatternInfoArea represents the pattern details display.
+// SetOutput sets the output text and updates the UI.
+func (oa *OutputArea) SetOutput(output string) {
+    oa.outputText.SetText(output)
+    oa.outputInfo.SetText(fmt.Sprintf("Last executed: %s", time.Now().Format("Jan 2, 2006 15:04:05")))
+    
+    // Enable buttons if output is not empty
+    if output == "" {
+        oa.copyButton.Disable()
+        oa.saveButton.Disable()
+        oa.clearButton.Disable()
+    } else {
+        oa.copyButton.Enable()
+        oa.saveButton.Enable()
+        oa.clearButton.Enable()
+    }
+}
+
+// PatternInfoArea displays details about the selected pattern.
 type PatternInfoArea struct {
     app *FabricApp // Reference to the main app
 
     container *fyne.Container
-    // Pattern details widgets
-    nameLabel    *widget.Label
-    modelLabel   *widget.Label
-    description  *widget.Entry
-    systemPrompt *widget.Entry
-    userPrompt   *widget.Entry
-    tagsLabel    *widget.Label
+    
+    // Pattern info components
+    nameLabel       *widget.Label
+    descriptionText *widget.TextArea
+    tagsLabel       *widget.Label
+    
+    // System and user prompts
+    systemPromptText *widget.TextArea
+    userPromptText   *widget.TextArea
+    
+    // Model info
+    modelInfoLabel *widget.Label
 }
 
 // NewPatternInfoArea creates a new pattern info area.
 func NewPatternInfoArea(app *FabricApp) *PatternInfoArea {
     pia := &PatternInfoArea{app: app}
-
-    // Pattern name (bold)
-    pia.nameLabel = widget.NewLabel("No Pattern Selected")
-    pia.nameLabel.TextStyle = fyne.TextStyle{Bold: true}
     
-    // Model and vendor info
-    pia.modelLabel = widget.NewLabel("Model: Not set")
-    pia.modelLabel.Importance = widget.HighImportance
+    // Create pattern info components
+    pia.nameLabel = widget.NewLabelWithStyle("No pattern selected", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
     
-    // Tags display
+    pia.descriptionText = widget.NewMultiLineEntry()
+    pia.descriptionText.SetPlaceHolder("Pattern description will appear here...")
+    pia.descriptionText.Disable() // Read-only
+    
     pia.tagsLabel = widget.NewLabel("Tags: none")
-    pia.tagsLabel.Importance = widget.MediumImportance
-
-    // Description (read-only)
-    pia.description = widget.NewMultiLineEntry()
-    pia.description.Disable()
-    pia.description.SetMinRowsVisible(3)
-    pia.description.SetPlaceHolder("Pattern description")
-
-    // System prompt (read-only)
-    pia.systemPrompt = widget.NewMultiLineEntry()
-    pia.systemPrompt.Disable()
-    pia.systemPrompt.SetMinRowsVisible(10)
-    pia.systemPrompt.SetPlaceHolder("System prompt content will be displayed here")
-
-    // User prompt (read-only, optional for many patterns)
-    pia.userPrompt = widget.NewMultiLineEntry()
-    pia.userPrompt.Disable()
-    pia.userPrompt.SetMinRowsVisible(5)
-    pia.userPrompt.SetPlaceHolder("User prompt content will be displayed here (if present)")
-
-    // Layout with scrolling for long prompts
-    headerSection := container.NewVBox(
+    
+    // Create system prompt text area
+    pia.systemPromptText = widget.NewMultiLineEntry()
+    pia.systemPromptText.SetPlaceHolder("System prompt will appear here...")
+    pia.systemPromptText.Disable() // Read-only
+    
+    // Create user prompt text area
+    pia.userPromptText = widget.NewMultiLineEntry()
+    pia.userPromptText.SetPlaceHolder("User prompt will appear here...")
+    pia.userPromptText.Disable() // Read-only
+    
+    // Create model info label
+    pia.modelInfoLabel = widget.NewLabel("Model: none  Vendor: none")
+    
+    // Create prompt tabs
+    promptTabs := container.NewAppTabs(
+        container.NewTabItem("System Prompt", pia.systemPromptText),
+        container.NewTabItem("User Prompt", pia.userPromptText),
+    )
+    
+    // Create info section
+    infoSection := container.NewVBox(
         pia.nameLabel,
-        pia.modelLabel,
-        pia.tagsLabel,
-        widget.NewLabel("Description:"),
-        pia.description,
-    )
-    
-    promptSection := container.NewVBox(
         widget.NewSeparator(),
-        widget.NewLabelWithStyle("System Prompt:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-        pia.systemPrompt,
-        widget.NewLabelWithStyle("User Prompt:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-        pia.userPrompt,
+        widget.NewLabel("Description:"),
+        pia.descriptionText,
+        pia.tagsLabel,
+        widget.NewSeparator(),
+        pia.modelInfoLabel,
     )
     
-    // Use a scroll container for the whole view
-    scrollContainer := container.NewVScroll(
-        container.NewVBox(headerSection, promptSection),
+    // Assemble the pattern info area
+    pia.container = container.NewBorder(
+        infoSection,          // Top
+        nil,                  // Bottom
+        nil, nil,             // Left, Right
+        promptTabs,           // Center
     )
-    pia.container = container.NewMax(scrollContainer)
     
     return pia
 }
@@ -1007,59 +834,81 @@ func (pia *PatternInfoArea) Container() fyne.CanvasObject {
 // UpdateInfo updates the pattern info display.
 func (pia *PatternInfoArea) UpdateInfo(patternName, modelName, vendorName string) {
     if patternName == "" {
-        pia.nameLabel.SetText("No Pattern Selected")
-        pia.modelLabel.SetText("Model: Not set")
+        pia.nameLabel.SetText("No pattern selected")
+        pia.descriptionText.SetText("")
         pia.tagsLabel.SetText("Tags: none")
-        pia.description.SetText("")
-        pia.systemPrompt.SetText("")
-        pia.userPrompt.SetText("")
-    } else {
-        pia.nameLabel.SetText(patternName)
-        
-        // Model info
-        if modelName != "" {
-            if vendorName != "" {
-                pia.modelLabel.SetText(fmt.Sprintf("Model: %s (%s)", modelName, vendorName))
-            } else {
-                pia.modelLabel.SetText(fmt.Sprintf("Model: %s", modelName))
-            }
-        } else {
-            pia.modelLabel.SetText("Model: Not set")
-        }
-        
-        // Find pattern to display details
-        for _, p := range pia.app.state.LoadedPatterns {
-            if p.Name == patternName || p.ID == pia.app.state.CurrentPatternID {
-                pia.SetPattern(p)
-                return
-            }
-        }
-        
-        // Pattern not found, use placeholder
-        pia.description.SetText("Pattern details not available")
-        pia.systemPrompt.SetText("")
-        pia.userPrompt.SetText("")
-        pia.tagsLabel.SetText("Tags: none")
+        pia.systemPromptText.SetText("")
+        pia.userPromptText.SetText("")
+        return
     }
+    
+    // Update pattern name
+    pia.nameLabel.SetText(patternName)
+    
+    // Find pattern by name
+    var pattern Pattern
+    found := false
+    for _, p := range pia.app.state.LoadedPatterns {
+        if p.Name == patternName {
+            pattern = p
+            found = true
+            break
+        }
+    }
+    
+    if !found {
+        pia.descriptionText.SetText("Pattern details not found")
+        pia.tagsLabel.SetText("Tags: none")
+        pia.systemPromptText.SetText("")
+        pia.userPromptText.SetText("")
+        return
+    }
+    
+    // Update description
+    pia.descriptionText.SetText(pattern.Description)
+    
+    // Update tags
+    if len(pattern.Tags) == 0 {
+        pia.tagsLabel.SetText("Tags: none")
+    } else {
+        pia.tagsLabel.SetText("Tags: " + strings.Join(pattern.Tags, ", "))
+    }
+    
+    // Update prompts
+    pia.systemPromptText.SetText(pattern.SystemPrompt)
+    pia.userPromptText.SetText(pattern.UserPrompt)
+    
+    // Update model info
+    pia.modelInfoLabel.SetText(fmt.Sprintf("Model: %s  Vendor: %s", modelName, vendorName))
 }
 
-// SetPattern sets the content of this panel to display a pattern's details
-func (pia *PatternInfoArea) SetPattern(p Pattern) {
-    pia.nameLabel.SetText(p.Name)
-    pia.description.SetText(p.Description)
-    pia.systemPrompt.SetText(p.SystemMD)
-    pia.userPrompt.SetText(p.UserMD)
+// StatusBar displays status messages at the bottom of the window.
+type StatusBar struct {
+    label     *widget.Label
+    container *fyne.Container
+}
+
+// NewStatusBar creates a new status bar.
+func NewStatusBar() *StatusBar {
+    sb := &StatusBar{}
     
-    // Format tags
-    if len(p.Tags) > 0 {
-        pia.tagsLabel.SetText("Tags: " + strings.Join(p.Tags, ", "))
-    } else {
-        pia.tagsLabel.SetText("Tags: none")
-    }
+    // Create status label
+    sb.label = widget.NewLabel("Ready")
     
-    // Model info from app state
-    if pia.app.state.CurrentModelName != "" {
-        pia.modelLabel.SetText(fmt.Sprintf("Model: %s (%s)", 
-            pia.app.state.CurrentModelName, pia.app.state.CurrentVendorID))
-    }
+    // Create container
+    sb.container = container.NewHBox(
+        sb.label,
+    )
+    
+    return sb
+}
+
+// Container returns the root Fyne container for the StatusBar.
+func (sb *StatusBar) Container() fyne.CanvasObject {
+    return sb.container
+}
+
+// ShowMessage displays a message in the status bar.
+func (sb *StatusBar) ShowMessage(message string) {
+    sb.label.SetText(message)
 }
