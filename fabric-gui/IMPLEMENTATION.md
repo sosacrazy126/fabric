@@ -9,7 +9,9 @@ The Fabric GUI follows a component-based architecture with clear separation of c
 1. **Core Application** (`FabricApp` in `foundation/app.go`)
    - Central coordination point
    - Manages application state
-   - Loads patterns from filesystem
+   - Loads patterns from Fabric's database with filesystem fallback
+   - Integrates with Fabric's execution pipeline
+   - Handles configuration management
    - Initializes UI components
 
 2. **Layout System** (`MainLayout` in `foundation/layouts.go`)
@@ -30,32 +32,96 @@ Application state is centralized in the `AppState` structure:
 
 ```go
 type AppState struct {
+    // Pattern Selection
     CurrentPatternID   string
     CurrentInputText   string
     LastOutput         string
     LoadedPatterns     []Pattern
     FilteredPatterns   []Pattern
-    InputSourceType    string // "Text", "Clipboard", "File", "URL", "YouTube"
     
-    // Model parameters
+    // Model Configuration
     CurrentModelID     string
     CurrentModelName   string
     CurrentVendorID    string
     Temperature        float64
-    // ... additional parameters
+    TopP               float64
+    PresencePenalty    float64
+    FrequencyPenalty   float64
+    Seed               int
+    ContextLength      int
+    Strategy           string
+    
+    // UI State
+    LastActiveTab      string
+    InputSourceType    string // "Text", "Clipboard", "File", "URL"
+    OutputFormat       string // "Text", "Markdown", "JSON"
+    SearchQuery        string
+    SelectedTags       []string
+    
+    // Data Caches
+    LoadedVendors      []string
+    LoadedModels       map[string][]string
+    LoadedStrategies   []string
+    
+    // Session History
+    LastUsedPatterns   []string
+    LastInputs         []string
+    LastRun            time.Time
 }
 ```
 
 ## Pattern Loading
 
-Patterns are loaded from the filesystem using the `PatternLoader` in `foundation/pattern.go`. The loader:
+Patterns are loaded using a multi-tiered approach:
 
-1. Locates the Fabric data directory
-2. Finds pattern folders and descriptions
-3. Loads each pattern's system.md and user.md files
-4. Populates the application state with loaded patterns
+1. **Primary Source**: Fabric's `fsdb` database via `foundation/config.go`
+   - Uses Fabric's internal APIs to access patterns
+   - Retrieves metadata, tags, and content
+   - Handles pattern organization and grouping
 
-The pattern loading process includes error handling and timeouts to prevent the application from hanging.
+2. **Fallback Mechanism**: Direct filesystem loading via `PatternLoader` in `foundation/pattern.go`
+   - Locates the Fabric data directory using `foundation/paths.go`
+   - Finds pattern folders and descriptions
+   - Loads each pattern's system.md and user.md files
+   - Uses worker pools to load patterns in parallel for better performance
+
+Both approaches include comprehensive error handling, timeouts, and graceful degradation to prevent the application from hanging or crashing.
+
+```go
+// Sample from ExecutionManager in foundation/execution.go
+func (em *ExecutionManager) ExecutePattern(config ExecutionConfig) (*ExecutionResult, error) {
+    // Create execution options from config
+    execOptions := common.Options{
+        Model:           config.Model,
+        Vendor:          config.Vendor,
+        Temperature:     config.Temperature,
+        TopP:            config.TopP,
+        PresencePenalty: config.PresencePenalty,
+        // Other options...
+    }
+    
+    // Create session using Fabric's BuildSession
+    session, err := cli.BuildSession(ctx, db, pattern.ID, config.Input, &execOptions)
+    if err != nil {
+        return nil, fmt.Errorf("failed to build session: %w", err)
+    }
+    
+    // Execute session
+    response, err := session.Execute()
+    if err != nil {
+        return nil, fmt.Errorf("execution failed: %w", err)
+    }
+    
+    // Return results
+    return &ExecutionResult{
+        Output:        response,
+        PatternID:     config.PatternID,
+        Timestamp:     time.Now(),
+        ExecutionTime: time.Since(startTime),
+        Success:       true,
+    }, nil
+}
+```
 
 ## UI Implementation
 
@@ -69,33 +135,45 @@ The main layout is a horizontal split with:
 - Left side: Pattern navigation sidebar
 - Right side: Tabbed interface for input, output, and pattern details
 
+## Current Features
+
+1. **Pattern Management**: Full pattern loading from Fabric's database with filesystem fallback and parallel loading for performance.
+
+2. **Search and Filtering**: Complete search by name, description, and content, with tag-based filtering.
+
+3. **Core Integration**: Full integration with Fabric's core processing capabilities through the `ExecutionManager` in `foundation/execution.go`.
+
+4. **Configuration Management**: Settings are loaded from and saved to Fabric's .env file via `FabricConfig` in `foundation/config.go`.
+
+5. **Model Selection**: Support for selecting models and vendors, with parameter adjustment.
+
 ## Current Limitations
 
-1. **Pattern Filtering**: The search and tag filtering functionality is partially implemented.
+1. **Input Sources**: Advanced input handling for files and URLs is partially implemented.
 
-2. **Core Integration**: The application currently does not integrate with Fabric's core processing capabilities. The execution function (`executePattern`) contains placeholder code that simulates pattern execution.
+2. **Output Formatting**: Advanced output formatting (markdown, syntax highlighting) is not fully implemented.
 
-3. **Settings**: Configuration and settings management is not yet implemented.
-
-4. **Data Persistence**: User inputs, results, and settings are not saved between sessions.
+3. **Data Persistence**: While configuration is saved, execution history and pattern favorites are not persisted between sessions.
 
 ## Next Steps
 
 ### Immediate Tasks
 
-1. **Complete Search/Filtering**: Implement the pattern filtering functionality in the sidebar panel.
+1. **Complete Input Sources**: Finish the implementation of file uploading and URL fetching.
 
-2. **Integrate with Fabric Core**: Connect the execution logic to Fabric's actual pattern processing.
+2. **Enhance Output Formatting**: Add markdown rendering and syntax highlighting for code blocks.
 
-3. **Input Sources**: Complete the implementation of different input sources (clipboard, file, URL).
+3. **Session Management**: Implement saving and loading of execution history and user preferences.
 
 ### Medium-Term Tasks
 
-1. **Settings Panel**: Create a settings panel for configuring models, vendors, and parameters.
+1. **Advanced Settings Panel**: Enhance the settings panel with more configuration options and presets.
 
-2. **Result Management**: Add functionality to save, load, and export results.
+2. **Result Management**: Add functionality to export results in various formats (PDF, HTML, JSON).
 
-3. **Enhanced UI**: Add tooltips, keyboard shortcuts, and improved layout options.
+3. **Enhanced UI**: Add tooltips, keyboard shortcuts, and accessibility improvements.
+
+4. **Dark Mode**: Implement dark mode and customizable themes.
 
 ### Long-Term Vision
 
@@ -109,12 +187,18 @@ The main layout is a horizontal split with:
 
 The codebase follows these patterns and conventions:
 
-1. **Composition Over Inheritance**: UI components are composed rather than inherited.
+1. **Composition Over Inheritance**: UI components are composed rather than inherited, following Fyne's container model.
 
-2. **Centralized State**: Application state is managed centrally and passed to components.
+2. **Centralized State Management**: Application state is managed centrally in `AppState` with clear update patterns.
 
-3. **Error Handling**: Errors are logged and, where possible, presented to the user.
+3. **Comprehensive Error Handling**: Multi-tiered error handling with logging, user feedback, and graceful fallbacks.
 
-4. **Progressive Enhancement**: The application can function with minimal pattern data, adding features as available.
+4. **Progressive Enhancement**: The application functions with minimal data, adding features as available.
 
-5. **Separation of Concerns**: UI components, data loading, and business logic are separated.
+5. **Separation of Concerns**: Clear separation between UI components, data management, and business logic.
+
+6. **Concurrency Patterns**: Safe goroutine usage with proper synchronization and timeout handling.
+
+7. **Configuration Management**: Structured approach to loading, validating, and saving configuration.
+
+8. **Path Resolution**: Flexible path handling for different environments (development, user installation).

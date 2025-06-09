@@ -3,26 +3,25 @@ package foundation
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
-// Pattern represents a Fabric pattern for GUI display and management
-type Pattern struct {
-	ID          string   // Unique identifier (folder name)
-	Name        string   // Display name (may be formatted version of ID)
-	Description string   // Short description from pattern_descriptions.json
-	SystemMD    string   // Content of system.md
-	UserMD      string   // Content of user.md (if exists)
-	Tags        []string // For filtering and categorization
-}
+// Pattern definition moved to types.go for centralized type management
+
+// GetShortDescription moved to types.go for centralized type management
 
 // PatternLoader handles loading patterns from filesystem
 type PatternLoader struct {
 	PatternsDir        string // Directory containing pattern folders
 	DescriptionsPath   string // Path to pattern_descriptions.json
 	descriptionsByName map[string]PatternDescription
+	mutex              sync.RWMutex // Protects map during concurrent operations
+	lastRefreshTime    time.Time // Tracks when descriptions were last refreshed
 }
 
 // PatternDescription matches the structure in pattern_descriptions.json
@@ -48,6 +47,10 @@ func NewPatternLoader(patternsDir, descriptionsPath string) *PatternLoader {
 
 // LoadPatternDescriptions loads pattern descriptions from JSON file
 func (pl *PatternLoader) LoadPatternDescriptions() error {
+	// Use mutex to protect the map during update
+	pl.mutex.Lock()
+	defer pl.mutex.Unlock()
+	
 	// Read the descriptions file
 	data, err := os.ReadFile(pl.DescriptionsPath)
 	if err != nil {
@@ -60,11 +63,17 @@ func (pl *PatternLoader) LoadPatternDescriptions() error {
 		return fmt.Errorf("failed to parse pattern descriptions: %w", err)
 	}
 
-	// Build lookup map
+	// Create a new map (don't reuse existing one to avoid partial updates)
+	newDescMap := make(map[string]PatternDescription)
 	for _, desc := range descriptionsFile.Patterns {
-		pl.descriptionsByName[desc.PatternName] = desc
+		newDescMap[desc.PatternName] = desc
 	}
-
+	
+	// Replace the map atomically
+	pl.descriptionsByName = newDescMap
+	pl.lastRefreshTime = time.Now()
+	
+	log.Printf("Loaded %d pattern descriptions", len(pl.descriptionsByName))
 	return nil
 }
 
@@ -72,14 +81,18 @@ func (pl *PatternLoader) LoadPatternDescriptions() error {
 func (pl *PatternLoader) LoadAllPatterns() ([]Pattern, error) {
 	log.Println("LoadAllPatterns: Starting to load patterns from", pl.PatternsDir)
 	
-	// Make sure descriptions are loaded
-	if len(pl.descriptionsByName) == 0 {
+	// Make sure descriptions are loaded (thread-safe check)
+	pl.mutex.RLock()
+	descCount := len(pl.descriptionsByName)
+	refreshNeeded := time.Since(pl.lastRefreshTime) > 1*time.Hour // Refresh once per hour
+	pl.mutex.RUnlock()
+	
+	if descCount == 0 || refreshNeeded {
 		log.Println("LoadAllPatterns: Loading pattern descriptions")
 		if err := pl.LoadPatternDescriptions(); err != nil {
 			log.Printf("LoadAllPatterns: Failed to load pattern descriptions: %v", err)
-			return nil, err
+			// Continue anyway - we'll use derived descriptions as fallback
 		}
-		log.Printf("LoadAllPatterns: Loaded %d pattern descriptions", len(pl.descriptionsByName))
 	}
 
 	// List pattern directories
@@ -91,22 +104,54 @@ func (pl *PatternLoader) LoadAllPatterns() ([]Pattern, error) {
 	}
 	log.Printf("LoadAllPatterns: Found %d entries in patterns directory", len(entries))
 
-	// Load each pattern
-	patterns := make([]Pattern, 0, len(entries))
+	// Use worker pool to load patterns in parallel for better performance
+	type patternResult struct {
+		pattern Pattern
+		err     error
+	}
+	
+	// Create a buffered channel for results
+	resultChan := make(chan patternResult, len(entries))
+	
+	// Start workers (limit to 8 concurrent goroutines to avoid overwhelming the system)
+	workerCount := 8
+	if len(entries) < workerCount {
+		workerCount = len(entries)
+	}
+	
+	// Create a channel for distributing work
+	jobChan := make(chan string, len(entries))
+	
+	// Start worker pool
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			for patternID := range jobChan {
+				pattern, err := pl.LoadPattern(patternID)
+				resultChan <- patternResult{pattern, err}
+			}
+		}()
+	}
+	
+	// Queue up all pattern directories for processing
+	patternCount := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue // Skip non-directories
 		}
-
-		patternID := entry.Name()
-		log.Printf("LoadAllPatterns: Loading pattern %s", patternID)
-		pattern, err := pl.LoadPattern(patternID)
-		if err != nil {
-			log.Printf("LoadAllPatterns: Warning: failed to load pattern %s: %v", patternID, err)
-			continue // Skip patterns that fail to load
+		patternCount++
+		jobChan <- entry.Name()
+	}
+	close(jobChan) // No more jobs to add
+	
+	// Collect results
+	patterns := make([]Pattern, 0, patternCount)
+	for i := 0; i < patternCount; i++ {
+		result := <-resultChan
+		if result.err != nil {
+			log.Printf("LoadAllPatterns: Warning: failed to load pattern: %v", result.err)
+			continue
 		}
-
-		patterns = append(patterns, pattern)
+		patterns = append(patterns, result.pattern)
 	}
 
 	log.Printf("LoadAllPatterns: Successfully loaded %d patterns", len(patterns))
@@ -120,38 +165,51 @@ func (pl *PatternLoader) LoadPattern(patternID string) (Pattern, error) {
 	pattern := Pattern{
 		ID:   patternID,
 		Name: formatPatternName(patternID),
+		Path: filepath.Join(pl.PatternsDir, patternID),
 	}
 
 	// Load system.md
-	systemPath := filepath.Join(pl.PatternsDir, patternID, "system.md")
+	systemPath := filepath.Join(pattern.Path, "system.md")
 	log.Printf("LoadPattern: Reading system.md from %s", systemPath)
 	systemContent, err := os.ReadFile(systemPath)
 	if err != nil {
 		log.Printf("LoadPattern: Failed to read system.md: %v", err)
-		return Pattern{}, fmt.Errorf("failed to read system.md: %w", err)
+		return Pattern{}, fmt.Errorf("failed to read system.md for pattern '%s': %w", patternID, err)
 	}
 	pattern.SystemMD = string(systemContent)
 	log.Printf("LoadPattern: Successfully read system.md (%d bytes)", len(systemContent))
 
 	// Try to load user.md (optional)
-	userPath := filepath.Join(pl.PatternsDir, patternID, "user.md")
+	userPath := filepath.Join(pattern.Path, "user.md")
 	userContent, err := os.ReadFile(userPath)
 	if err == nil {
 		pattern.UserMD = string(userContent)
 		log.Printf("LoadPattern: Successfully read user.md (%d bytes)", len(userContent))
 	} else {
-		log.Printf("LoadPattern: No user.md found (or error: %v)", err)
+		// Not having user.md is normal for many patterns
+		pattern.UserMD = ""
 	}
 
 	// Add description and tags from pattern_descriptions.json if available
-	if desc, ok := pl.descriptionsByName[patternID]; ok {
+	pl.mutex.RLock() // Thread-safe read from the map
+	desc, ok := pl.descriptionsByName[patternID]
+	pl.mutex.RUnlock()
+	
+	if ok {
 		pattern.Description = desc.Description
 		pattern.Tags = desc.Tags
-		log.Printf("LoadPattern: Found description in JSON: %s", pattern.Description[:min(30, len(pattern.Description))])
+		if len(pattern.Description) > 0 {
+			truncDesc := pattern.Description
+			if len(truncDesc) > 30 {
+				truncDesc = truncDesc[:30] + "..."
+			}
+			log.Printf("LoadPattern: Found description in JSON: %s", truncDesc)
+		}
 	} else {
 		// Fallback: derive description from first line of system.md
 		pattern.Description = deriveDescription(pattern.SystemMD)
-		log.Printf("LoadPattern: Derived description: %s", pattern.Description[:min(30, len(pattern.Description))])
+		pattern.Tags = deriveTagsFromContent(pattern.SystemMD, patternID)
+		log.Printf("LoadPattern: Derived description (no JSON entry found)")
 	}
 
 	log.Printf("LoadPattern: Successfully loaded pattern %s", patternID)
@@ -195,4 +253,39 @@ func deriveDescription(systemMD string) string {
 		}
 	}
 	return "No description available"
+}
+
+// deriveTagsFromContent extracts potential tags from the pattern content and ID
+func deriveTagsFromContent(systemMD string, patternID string) []string {
+	tagSet := make(map[string]struct{})
+	
+	// Add tags from pattern ID (e.g., "analyze_threat_report" -> ["analyze", "threat", "report"])
+	parts := strings.Split(patternID, "_")
+	for _, part := range parts {
+		if len(part) > 2 { // Avoid very short words
+			tagSet[part] = struct{}{}
+		}
+	}
+	
+	// Look for common keywords in system.md
+	keywords := []string{
+		"analyze", "summarize", "extract", "create", "generate", "explain", 
+		"write", "review", "evaluate", "translate", "convert", "recommend",
+		"security", "threat", "report", "code", "article", "email", "paper",
+		"academic", "business", "technical", "creative", "visualization",
+	}
+	
+	for _, keyword := range keywords {
+		if strings.Contains(strings.ToLower(systemMD), keyword) {
+			tagSet[keyword] = struct{}{}
+		}
+	}
+	
+	// Convert set to slice
+	tags := make([]string, 0, len(tagSet))
+	for tag := range tagSet {
+		tags = append(tags, tag)
+	}
+	
+	return tags
 }

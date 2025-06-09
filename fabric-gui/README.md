@@ -1,6 +1,6 @@
 # Fabric GUI
 
-A modern graphical user interface for the Fabric AI pattern tool, built with Go and the Fyne toolkit.
+A modern graphical user interface for the Fabric AI pattern execution system, built with Go and the Fyne toolkit.
 
 ## Overview
 
@@ -13,32 +13,45 @@ Fabric GUI provides a user-friendly interface to interact with Fabric AI pattern
 
 ## Architecture
 
-The application follows a component-based architecture:
+The application follows a modern component-based architecture with clean separation of concerns:
 
-- **Main Application**: Central coordination point
-- **Layout System**: Modern split-view design with sidebar and content area
-- **Patterns Panel**: Browse, search, and select patterns
-- **Input/Output Areas**: Work with pattern inputs and view results
-- **Pattern Info**: View detailed pattern information
+### Core Components
+
+- **AppState**: Centralized state management for the entire application
+- **FabricConfig**: Interface to Fabric's configuration and database
+- **ExecutionManager**: Handles pattern execution with proper error handling
+- **PatternLoader**: Loads patterns from filesystem or Fabric's database
+
+### UI Components
+
+- **MainLayout**: Split view with sidebar and main content areas
+- **SidebarPanel**: Pattern browsing, searching, and selection
+- **MainContentPanel**: Tabbed interface for input, output, and pattern details
+- **InputArea**: Text, file, URL inputs with source selection
+- **OutputArea**: Result display with formatting options
+- **PatternInfoArea**: Pattern metadata, prompts, and tags
 
 ## Current Implementation Status
 
 As of June 2023:
 
 - ✅ Core application structure implemented
-- ✅ Pattern loading from file system
+- ✅ Pattern loading from Fabric's database
 - ✅ Modern UI layout with sidebar and main content
 - ✅ Pattern browsing and selection
-- ✅ Basic execution flow
-- ✅ Error handling and logging
-- ⚠️ Search/filtering partially implemented
-- ❌ API integration with Fabric core not yet implemented
-- ❌ Settings and configuration not yet implemented
+- ✅ Search/filtering functionality
+- ✅ Model and vendor selection
+- ✅ Execution pipeline with Fabric core integration
+- ✅ Configuration management and persistence
+- ✅ Comprehensive error handling and logging
+- ⚠️ Input handling for files and URLs partially implemented
+- ⚠️ Output formatting options partially implemented
 
 ## Development Requirements
 
-- Go 1.17 or later
+- Go 1.20 or later
 - Fyne v2 toolkit
+- Fabric CLI installed and configured
 - C compiler for CGO
 - Graphics drivers that support OpenGL
 
@@ -76,14 +89,17 @@ Or use the provided run script:
 ```
 fabric-gui/
 ├── cmd/
-│   └── gui/             # Command-line entry point
+│   └── gui/
+│       └── main.go      # Application entry point
 ├── foundation/          # Core application components
-│   ├── app.go           # Main application
-│   ├── layouts.go       # UI layouts and components
+│   ├── app.go           # Main application structure
+│   ├── config.go        # Configuration management
+│   ├── execution.go     # Pattern execution pipeline
+│   ├── layouts.go       # UI components and layouts
+│   ├── paths.go         # Filesystem path management
 │   ├── pattern.go       # Pattern loading and management
-│   └── types.go         # Type definitions
+│   └── types.go         # Data structures and state
 ├── assets/              # Application assets
-├── main.go              # Main entry point
 └── run.sh               # Helper script
 ```
 
@@ -94,9 +110,11 @@ See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues and solutions.
 ## Future Development
 
 Planned features:
-- Complete search and filtering functionality
-- Integration with Fabric's core processing capabilities
-- Save/load user inputs and results
-- Model and vendor selection
-- Parameter adjustment for different AI models
-- Export results in various formats
+- Enhanced input handling for files, URLs, and clipboard
+- Advanced output formatting with markdown and syntax highlighting
+- Save/load user sessions and execution history
+- Batch pattern execution
+- Enhanced visualization of execution metrics
+- Export results in various formats (PDF, HTML, etc.)
+- Keyboard shortcuts and accessibility improvements
+- Dark mode and customizable themes
