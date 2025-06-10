@@ -38,8 +38,7 @@ func (fc *FabricConfig) Initialize() error {
 	// Initialize Fabric's database
 	fc.fabricDB = fsdb.NewDb(fc.paths.ConfigDir)
 	if err := fc.fabricDB.Configure(); err != nil {
-		log.Printf("Warning: Fabric DB configuration failed: %v", err)
-		// Continue anyway, but functionality may be limited
+		return fmt.Errorf("failed to configure Fabric DB: %w", err)
 	}
 	
 	// Initialize Fabric's core PluginRegistry
@@ -48,9 +47,9 @@ func (fc *FabricConfig) Initialize() error {
 		return fmt.Errorf("failed to initialize Fabric Plugin Registry: %w", err)
 	}
 	
+	// Configure the registry - this is where Fabric sets up vendors
 	if err := registry.Configure(); err != nil {
-		log.Printf("Warning: Fabric Plugin Registry configuration failed: %v", err)
-		// Continue anyway, but AI models might not be available
+		return fmt.Errorf("failed to configure plugin registry: %w", err)
 	}
 	
 	fc.registry = registry
@@ -197,13 +196,17 @@ func (fc *FabricConfig) LoadVendors() ([]string, error) {
 	
 	// Get the VendorsManager from the registry
 	vendorManager := fc.registry.VendorManager
+	if vendorManager == nil {
+		return nil, fmt.Errorf("vendor manager not initialized")
+	}
 	
-	// Extract vendors only (don't load models yet)
-	vendors := make([]string, 0, len(vendorManager.Vendors))
-	
+	// Extract only configured vendors
+	vendors := make([]string, 0)
 	for _, vendor := range vendorManager.Vendors {
-		vendorName := vendor.GetName()
-		vendors = append(vendors, vendorName)
+		if vendor.IsConfigured() {
+			vendorName := vendor.GetName()
+			vendors = append(vendors, vendorName)
+		}
 	}
 	
 	return vendors, nil
@@ -217,22 +220,18 @@ func (fc *FabricConfig) LoadModelsForVendor(vendorName string) ([]string, error)
 	
 	// Get the VendorsManager from the registry
 	vendorManager := fc.registry.VendorManager
-	
-	// Find the vendor
-	var targetVendor ai.Vendor
-	for _, vendor := range vendorManager.Vendors {
-		if vendor.GetName() == vendorName {
-			targetVendor = vendor
-			break
-		}
+	if vendorManager == nil {
+		return nil, fmt.Errorf("vendor manager not initialized")
 	}
 	
-	if targetVendor == nil {
+	// Find the vendor
+	vendor := vendorManager.FindByName(vendorName)
+	if vendor == nil {
 		return nil, fmt.Errorf("vendor %s not found", vendorName)
 	}
 	
 	// Load models for this vendor only
-	models, err := targetVendor.ListModels()
+	models, err := vendor.ListModels()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list models for vendor %s: %w", vendorName, err)
 	}
@@ -287,44 +286,33 @@ func (fc *FabricConfig) loadPatternsFromFilesystem() ([]Pattern, error) {
 	return patterns, nil
 }
 
-// GetDefaultAppState populates an AppState with config values
+// GetDefaultAppState populates an AppState with config values from Fabric
 func (fc *FabricConfig) GetDefaultAppState() *AppState {
 	state := NewAppState()
 	
-	// Load model config
-	state.CurrentModelID = fc.GetConfig("DEFAULT_MODEL", "gpt-4o") // Default to a reasonable choice
-	state.CurrentVendorID = fc.GetConfig("DEFAULT_VENDOR", "openai") // Default to a reasonable choice
-	state.CurrentModelName = state.CurrentModelID // Will be updated later with friendly name if available
-	
-	// Load model parameters
-	state.Temperature = fc.GetFloat64Config("TEMPERATURE", 0.7)
-	state.TopP = fc.GetFloat64Config("TOP_P", 0.9)
-	state.PresencePenalty = fc.GetFloat64Config("PRESENCE_PENALTY", 0.0)
-	state.FrequencyPenalty = fc.GetFloat64Config("FREQUENCY_PENALTY", 0.0)
-	state.Seed = fc.GetIntConfig("SEED", 0)
-	state.ContextLength = fc.GetIntConfig("CONTEXT_LENGTH", 4096)
-	state.Strategy = fc.GetConfig("STRATEGY", "standard")
+	// Get defaults from Fabric registry
+	if fc.registry != nil && fc.registry.Defaults != nil {
+		state.CurrentModelID = fc.registry.Defaults.Model.Value
+		state.CurrentVendorID = fc.registry.Defaults.Vendor.Value
+		state.CurrentModelName = state.CurrentModelID
+		
+		// Get context length if available
+		if fc.registry.Defaults.ModelContextLength != nil {
+			state.ContextLength = fc.registry.Defaults.ModelContextLength.Value
+		}
+	}
 	
 	return state
 }
 
-// SaveAppStateToConfig saves AppState values to config
+// SaveAppStateToConfig saves AppState values to Fabric's configuration
 func (fc *FabricConfig) SaveAppStateToConfig(state *AppState) {
-	// Save model config
-	fc.SetConfig("DEFAULT_MODEL", state.CurrentModelID)
-	fc.SetConfig("DEFAULT_VENDOR", state.CurrentVendorID)
-	
-	// Save model parameters
-	fc.SetFloat64Config("TEMPERATURE", state.Temperature)
-	fc.SetFloat64Config("TOP_P", state.TopP)
-	fc.SetFloat64Config("PRESENCE_PENALTY", state.PresencePenalty)
-	fc.SetFloat64Config("FREQUENCY_PENALTY", state.FrequencyPenalty)
-	fc.SetIntConfig("SEED", state.Seed)
-	fc.SetIntConfig("CONTEXT_LENGTH", state.ContextLength)
-	fc.SetConfig("STRATEGY", state.Strategy)
-	
-	// Save to file
-	if err := fc.SaveEnvConfig(); err != nil {
-		log.Printf("Warning: Failed to save configuration: %v", err)
+	if fc.registry != nil && fc.registry.Defaults != nil {
+		// Update Fabric's defaults
+		fc.registry.Defaults.Model.Value = state.CurrentModelID
+		fc.registry.Defaults.Vendor.Value = state.CurrentVendorID
+		if fc.registry.Defaults.ModelContextLength != nil {
+			fc.registry.Defaults.ModelContextLength.Value = state.ContextLength
+		}
 	}
 }
