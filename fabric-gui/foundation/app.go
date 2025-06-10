@@ -55,7 +55,12 @@ func NewFabricApp() (*FabricApp, error) {
 	}
 	
 	// Initialize paths
-	fabricApp.fabricPaths = NewFabricPaths()
+	var err error
+	fabricApp.fabricPaths, err = GetFabricPaths()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Fabric paths: %w", err)
+	}
+	
 	log.Printf("Using config dir: %s", fabricApp.fabricPaths.ConfigDir)
 	log.Printf("Using patterns dir: %s", fabricApp.fabricPaths.PatternsDir)
 	
@@ -210,7 +215,7 @@ func (app *FabricApp) ShowError(err error) {
 	}
 }
 
-// ShowError with string parameter for direct string errors
+// ShowErrorStr with string parameter for direct string errors
 func (app *FabricApp) ShowErrorStr(message string) {
 	log.Printf("Error: %s", message)
 	if app.StatusBar != nil {

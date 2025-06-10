@@ -418,14 +418,14 @@ func (mc *MainContentPanel) executePattern() {
     // Get current pattern and input
     patternID := mc.app.state.CurrentPatternID
     if patternID == "" {
-        mc.app.ShowError("No pattern selected")
+        mc.app.ShowErrorStr("No pattern selected")
         return
     }
     
     // Get input text
     input := mc.inputArea.GetInput()
     if input == "" {
-        mc.app.ShowError("Input is empty")
+        mc.app.ShowErrorStr("Input is empty")
         return
     }
     
@@ -434,7 +434,7 @@ func (mc *MainContentPanel) executePattern() {
     vendorID := mc.app.state.CurrentVendorID
     
     if modelID == "" || vendorID == "" {
-        mc.app.ShowError("No model or vendor selected")
+        mc.app.ShowErrorStr("No model or vendor selected")
         return
     }
     
@@ -457,42 +457,52 @@ func (mc *MainContentPanel) executePattern() {
         }
         
         if !found {
-            mc.app.ShowError("Pattern not found")
+            mc.app.ShowErrorStr("Pattern not found")
             mc.runButton.Enable()
             mc.runButton.SetText(fmt.Sprintf("Run '%s'", mc.app.getPatternNameByID(patternID)))
             return
         }
         
         // Create execution manager
-        execManager := NewExecutionManager(mc.app.fabricConfig)
+        execManager := NewExecutionManager(mc.app, mc.app.fabricConfig)
         
-        // Execute pattern
-        result, err := execManager.ExecutePattern(pattern, input, modelID, vendorID)
-        
-        // Update UI on main thread
-        fyne.CurrentApp().Driver().RunOnMain(func() {
-            if err != nil {
-                mc.app.ShowError(fmt.Sprintf("Execution failed: %v", err))
-                mc.outputArea.SetOutput("Execution failed: " + err.Error())
-            } else {
-                // Update output area
-                mc.outputArea.SetOutput(result)
-                
-                // Update state
-                mc.app.state.LastOutput = result
-                mc.app.state.LastRun = time.Now()
-                
-                // Show success message
-                mc.app.StatusBar.ShowMessage("Execution completed successfully")
-                
-                // Switch to Results tab
-                mc.tabs.SelectTab(mc.tabs.Items[1]) // Results tab
-            }
-            
-            // Re-enable run button
-            mc.runButton.Enable()
-            mc.runButton.SetText(fmt.Sprintf("Run '%s'", pattern.Name))
+        // Execute pattern with config
+        result, err := execManager.ExecutePattern(ExecutionConfig{
+            PatternID:        pattern.ID,
+            Input:            input,
+            Model:            modelID,
+            Vendor:           vendorID,
+            Temperature:      mc.app.state.Temperature,
+            TopP:             mc.app.state.TopP,
+            PresencePenalty:  mc.app.state.PresencePenalty,
+            FrequencyPenalty: mc.app.state.FrequencyPenalty,
+            Seed:             mc.app.state.Seed,
+            ContextLength:    mc.app.state.ContextLength,
+            Strategy:         mc.app.state.Strategy,
         })
+        
+        // Update UI directly (we're already in a goroutine)
+        if err != nil {
+            mc.app.ShowError(err)
+            mc.outputArea.SetOutput("Execution failed: " + err.Error())
+        } else {
+            // Update output area
+            mc.outputArea.SetOutput(result.Output)
+            
+            // Update state
+            mc.app.state.LastOutput = result.Output
+            mc.app.state.LastRun = time.Now()
+            
+            // Show success message
+            mc.app.StatusBar.ShowMessage("Execution completed successfully")
+            
+            // Switch to Results tab
+            mc.tabs.SelectTab(mc.tabs.Items[1]) // Results tab
+        }
+        
+        // Re-enable run button
+        mc.runButton.Enable()
+        mc.runButton.SetText(fmt.Sprintf("Run '%s'", pattern.Name))
     }()
 }
 
@@ -534,7 +544,7 @@ func NewInputArea(app *FabricApp) *InputArea {
     ia.fileInput = widget.NewButton("Select File", func() {
         dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
             if err != nil {
-                app.ShowError(fmt.Sprintf("Error opening file: %v", err))
+                app.ShowError(fmt.Errorf("Error opening file: %v", err))
                 return
             }
             if reader == nil {
@@ -687,7 +697,7 @@ func NewOutputArea(app *FabricApp) *OutputArea {
     oa.saveButton = widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
         dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
             if err != nil {
-                app.ShowError(fmt.Sprintf("Error saving file: %v", err))
+                app.ShowError(fmt.Errorf("Error saving file: %v", err))
                 return
             }
             if writer == nil {
@@ -699,7 +709,7 @@ func NewOutputArea(app *FabricApp) *OutputArea {
             writer.Close()
             
             if err != nil {
-                app.ShowError(fmt.Sprintf("Error writing to file: %v", err))
+                app.ShowError(fmt.Errorf("Error writing to file: %v", err))
                 return
             }
             
