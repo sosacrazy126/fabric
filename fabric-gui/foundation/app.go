@@ -48,186 +48,49 @@ func NewFabricApp() (*FabricApp, error) {
 		log.Println("FABRIC_GUI_SKIP_PATTERNS=1, skipping pattern loading")
 	}
 
-	// Initialize the application with default state
-	app := &FabricApp{
+	// Create app instance
+	fabricApp := &FabricApp{
 		window: win,
 		state:  NewAppState(),
 	}
 	
-	// Initialize Fabric paths
-	fabricPaths, err := GetFabricPaths()
-	if err != nil {
-		log.Printf("Warning: Failed to get Fabric paths: %v", err)
-		// We'll create fallbacks later
+	// Initialize paths
+	fabricApp.fabricPaths = NewFabricPaths()
+	log.Printf("Using config dir: %s", fabricApp.fabricPaths.ConfigDir)
+	log.Printf("Using patterns dir: %s", fabricApp.fabricPaths.PatternsDir)
+	
+	// Initialize config
+	fabricApp.fabricConfig = NewFabricConfig(fabricApp.fabricPaths)
+	if err := fabricApp.fabricConfig.Initialize(); err != nil {
+		return nil, fmt.Errorf("failed to initialize Fabric configuration: %w", err)
 	}
-	app.fabricPaths = fabricPaths
 	
-	// Initialize Fabric config
-	fabricConfig := NewFabricConfig(fabricPaths)
-	if err := fabricConfig.Initialize(); err != nil {
-		log.Printf("Warning: Failed to initialize Fabric config: %v", err)
-		// We'll continue with defaults
-	}
-	app.fabricConfig = fabricConfig
+	// Initialize state with config values
+	fabricApp.state = fabricApp.fabricConfig.GetDefaultAppState()
 	
-	// Load settings from config to state
-	appState := fabricConfig.GetDefaultAppState()
-	app.state = appState
+	// Create main layout
+	fabricApp.mainLayout = NewMainLayout(fabricApp)
 	
-	// Initialize execution manager
-	app.execManager = NewExecutionManager(app, fabricConfig)
-
-	// Initialize pattern loader
-	app.patternLoader = NewPatternLoader(fabricPaths.PatternsDir, fabricPaths.DescriptionsPath)
-
-	// Load patterns (unless skipped)
+	// Store reference to status bar for easier access
+	fabricApp.StatusBar = fabricApp.mainLayout.StatusBar
+	
+	// Set content and configure window
+	win.SetContent(fabricApp.mainLayout.Container())
+	win.Resize(fyne.NewSize(1024, 768))
+	win.SetMaster() // This is the main window
+	
+	// Load patterns if not skipped
 	if !skipPatternLoading {
-		if err := app.loadPatterns(); err != nil {
-			log.Printf("Warning: failed to load patterns: %v", err)
-			// Continue anyway with an empty pattern list
-			app.state.LoadedPatterns = []Pattern{}
-			app.state.FilteredPatterns = []Pattern{}
-		}
-	} else {
-		// Create a simple test pattern for the UI
-		testPattern := Pattern{
-			ID:          "test_pattern",
-			Name:        "Test Pattern",
-			Description: "A test pattern for demonstration",
-			SystemMD:    "# Test Pattern\n\nThis is a test pattern.",
-			UserMD:      "",
-			Tags:        []string{"test"},
-		}
-		app.state.LoadedPatterns = []Pattern{testPattern}
-		app.state.FilteredPatterns = []Pattern{testPattern}
+		go fabricApp.loadPatterns()
 	}
-
-	// Load models and vendors
-	if err := app.loadModelsAndVendors(); err != nil {
-		log.Printf("Warning: failed to load models and vendors: %v", err)
-		// Continue with defaults
-		app.state.LoadedVendors = []string{app.state.CurrentVendorID}
-		app.state.LoadedModels = map[string][]string{
-			app.state.CurrentVendorID: {app.state.CurrentModelID},
-		}
-	}
-
-	// Initialize UI components
-	app.mainLayout = NewMainLayout(app)
-	app.StatusBar = app.mainLayout.StatusBar // Store direct reference to status bar
 	
-	// Set main window content
-	app.window.SetContent(app.mainLayout.Container())
-	
-	return app, nil
+	return fabricApp, nil
 }
 
-// loadPatterns loads all patterns using Fabric's database or the patternLoader
-func (app *FabricApp) loadPatterns() error {
-	log.Println("Loading patterns...")
-	// Initialize a temporary status message if StatusBar isn't ready yet
-	if app.StatusBar != nil {
-		app.StatusBar.ShowMessage("Loading patterns...")
-	}
-	
-	// Use a timeout mechanism to prevent hanging indefinitely
-	patternsChan := make(chan []Pattern, 1)
-	errChan := make(chan error, 1)
-	
-	go func() {
-		// First try loading from Fabric's database
-		if app.fabricConfig != nil {
-			patterns, err := app.fabricConfig.LoadPatterns()
-			if err == nil && len(patterns) > 0 {
-				patternsChan <- patterns
-				return
-			}
-			log.Printf("Warning: Failed to load patterns from Fabric DB: %v", err)
-			log.Println("Falling back to direct filesystem loading")
-		}
-		
-		// Fallback to direct filesystem loading
-		patterns, err := app.patternLoader.LoadAllPatterns()
-		if err != nil {
-			errChan <- err
-			return
-		}
-		patternsChan <- patterns
-	}()
-	
-	// Wait for patterns or timeout
-	select {
-	case patterns := <-patternsChan:
-		log.Printf("Loaded %d patterns successfully", len(patterns))
-		
-		// Sort patterns by name for better UX
-		sort.Slice(patterns, func(i, j int) bool {
-			return patterns[i].Name < patterns[j].Name
-		})
-		
-		app.state.LoadedPatterns = patterns
-		app.state.FilteredPatterns = make([]Pattern, len(patterns)) // Initialize filtered list
-		copy(app.state.FilteredPatterns, patterns)
-		
-		// If we have no patterns, create a fallback test pattern
-		if len(patterns) == 0 {
-			log.Println("No patterns found, creating test pattern")
-			testPattern := createTestPattern()
-			app.state.LoadedPatterns = []Pattern{testPattern}
-			app.state.FilteredPatterns = []Pattern{testPattern}
-		}
-		
-		if app.StatusBar != nil {
-			app.StatusBar.ShowMessage(fmt.Sprintf("Loaded %d patterns", len(app.state.LoadedPatterns)))
-		}
-		return nil
-		
-	case err := <-errChan:
-		log.Printf("Error loading patterns: %v", err)
-		if app.StatusBar != nil {
-			app.StatusBar.ShowError(err)
-		}
-		return err
-		
-	case <-time.After(15 * time.Second):
-		log.Println("Pattern loading timed out after 15 seconds")
-		// Create a test pattern so the UI can still function
-		testPattern := createTestPattern()
-		app.state.LoadedPatterns = []Pattern{testPattern}
-		app.state.FilteredPatterns = []Pattern{testPattern}
-		
-		if app.StatusBar != nil {
-			app.StatusBar.ShowError(fmt.Errorf("pattern loading timed out"))
-		}
-		return fmt.Errorf("pattern loading timed out")
-	}
-}
-
-
-// Run starts the application
+// Run starts the application main loop
 func (app *FabricApp) Run() {
-	app.window.Resize(fyne.NewSize(1200, 800))
 	app.window.ShowAndRun()
-	log.Println("Fabric GUI application event loop finished.")
 }
-
-// updateRunButtonText updates the text of the Run Pattern button in the Execute tab
-func (app *FabricApp) updateRunButtonText(patternName string) {
-	// This logic is now handled by MainContentPanel and update its RunButton
-	app.mainLayout.MainContent.UpdateRunButton(patternName)
-}
-
-// getPatternNameByID safely retrieves the pattern's display name from LoadedPatterns.
-func (app *FabricApp) getPatternNameByID(patternID string) string {
-	for _, p := range app.state.LoadedPatterns {
-		if p.ID == patternID {
-			return p.Name
-		}
-	}
-	return "" // Pattern not found
-}
-
-// Helper functions
 
 // ShowMessage displays a message in the status bar
 func (app *FabricApp) ShowMessage(message string) {
@@ -236,93 +99,69 @@ func (app *FabricApp) ShowMessage(message string) {
 	}
 }
 
-// ShowError displays an error message in the status bar
-func (app *FabricApp) ShowError(err error) {
-	if app.StatusBar != nil {
-		app.StatusBar.ShowError(err)
+// loadPatterns loads all patterns from Fabric's database
+func (app *FabricApp) loadPatterns() {
+	startTime := time.Now()
+	app.ShowMessage("Loading patterns...")
+	
+	// Create a channel to signal completion
+	done := make(chan bool)
+	var patterns []Pattern
+	var err error
+	
+	// Load patterns in a goroutine
+	go func() {
+		patterns, err = app.fabricConfig.LoadPatterns()
+		done <- true
+	}()
+	
+	// Wait for completion or timeout
+	select {
+	case <-done:
+		if err != nil {
+			log.Printf("Error loading patterns: %v", err)
+			app.StatusBar.ShowError(err.Error())
+			return
+		}
+		
+		app.processLoadedPatterns(patterns, startTime)
+		
+	case <-time.After(30 * time.Second):
+		log.Println("Pattern loading timed out after 30 seconds")
+		app.StatusBar.ShowError("Pattern loading timed out")
 	}
 }
 
-// StarOutput saves the current output as a favorite
-func (app *FabricApp) StarOutput(customName string) {
-	// Check if we have an output to star
-	if app.state.LastOutput == "" {
-		app.ShowMessage("No output to star")
-		return
+// processLoadedPatterns handles successfully loaded patterns
+func (app *FabricApp) processLoadedPatterns(patterns []Pattern, startTime time.Time) {
+	// Update app state
+	app.state.LoadedPatterns = patterns
+	app.state.FilteredPatterns = patterns // Initially, filtered = all
+	
+	// Sort patterns by name for better UX
+	sort.Slice(app.state.LoadedPatterns, func(i, j int) bool {
+		return app.state.LoadedPatterns[i].Name < app.state.LoadedPatterns[j].Name
+	})
+	
+	// Update UI
+	if app.mainLayout != nil && app.mainLayout.Sidebar != nil {
+		app.mainLayout.Sidebar.patternList.Refresh()
 	}
 	
-	// Generate a unique ID for this starred output
-	id := fmt.Sprintf("star_%d", len(app.state.StarredOutputs) + 1)
-	
-	// Get pattern information
-	patternName := app.getPatternNameByID(app.state.CurrentPatternID)
-	
-	// Create the output snapshot
-	starred := OutputSnapshot{
-		ID:           id,
-		PatternID:    app.state.CurrentPatternID,
-		PatternName:  patternName,
-		Timestamp:    time.Now(),
-		InputText:    app.state.CurrentInputText,
-		OutputText:   app.state.LastOutput,
-		Model:        app.state.CurrentModelID,
-		Vendor:       app.state.CurrentVendorID,
-		CustomName:   customName,
-	}
-	
-	// Add to starred outputs
-	app.state.StarredOutputs = append(app.state.StarredOutputs, starred)
-	
-	app.ShowMessage(fmt.Sprintf("Output starred as '%s'", customName))
+	// Update status
+	loadTime := time.Since(startTime)
+	app.ShowMessage(fmt.Sprintf("Loaded %d patterns in %v", len(patterns), loadTime.Round(time.Millisecond)))
+	log.Printf("Loaded %d patterns in %v", len(patterns), loadTime.Round(time.Millisecond))
 }
 
-// executePattern is the public method for running a pattern
-func (app *FabricApp) executePattern(config ExecutionConfig) (*ExecutionResult, error) {
-	if app.execManager == nil {
-		return nil, fmt.Errorf("execution manager not initialized")
+// getPatternNameByID returns the name of a pattern given its ID
+func (app *FabricApp) getPatternNameByID(id string) string {
+	for _, pattern := range app.state.LoadedPatterns {
+		if pattern.ID == id {
+			return pattern.Name
+		}
 	}
-	return app.execManager.ExecutePattern(config)
-}
-
-// createTestPattern generates a hardcoded pattern for fallback.
-func createTestPattern() Pattern {
-	return Pattern{
-		ID:          "test_pattern",
-		Name:        "Test Pattern",
-		Description: "A simple test pattern for demonstration purposes when no Fabric patterns are found.",
-		SystemMD:    "# Test Pattern\n\nThis is a simulated test pattern. If you see this, Fabric patterns could not be loaded from your system.\n\n## STEPS\n1. Acknowledge the input.\n2. Provide a simulated response.\n\n## OUTPUT INSTRUCTIONS\nRespond concisely.",
-		UserMD:      "",
-		Tags:        []string{"test", "simulation", "fallback"},
-	}
-}
-
-// loadModelsAndVendors loads available vendors (but not their models yet)
-func (app *FabricApp) loadModelsAndVendors() error {
-	log.Println("Loading AI vendors...")
-	if app.StatusBar != nil {
-		app.StatusBar.ShowMessage("Loading AI vendors...")
-	}
-	
-	if app.fabricConfig == nil {
-		return fmt.Errorf("fabric config not initialized")
-	}
-	
-	// Only load vendors initially (not models)
-	vendors, err := app.fabricConfig.LoadVendors()
-	if err != nil {
-		return fmt.Errorf("failed to load vendors: %w", err)
-	}
-	
-	// Store in app state
-	app.state.LoadedVendors = vendors
-	app.state.LoadedModels = make(map[string][]string) // Initialize empty model map
-	
-	log.Printf("Loaded %d AI vendors", len(vendors))
-	if app.StatusBar != nil {
-		app.StatusBar.ShowMessage(fmt.Sprintf("Loaded %d AI vendors", len(vendors)))
-	}
-	
-	return nil
+	return ""
 }
 
 // loadModelsForVendor loads models for a specific vendor on demand
@@ -347,21 +186,34 @@ func (app *FabricApp) loadModelsForVendor(vendorName string) error {
 	// Load models for this vendor
 	models, err := app.fabricConfig.LoadModelsForVendor(vendorName)
 	if err != nil {
-		log.Printf("Warning: failed to load models for %s: %v", vendorName, err)
-		// Set empty array for this vendor to avoid retrying constantly
-		app.state.LoadedModels[vendorName] = []string{}
-		app.state.VendorModelCounts[vendorName] = 0
-		return fmt.Errorf("failed to load models: %w", err)
+		log.Printf("Error loading models for vendor %s: %v", vendorName, err)
+		return err
 	}
 	
-	// Store in app state
+	// Cache models in app state
 	app.state.LoadedModels[vendorName] = models
 	app.state.VendorModelCounts[vendorName] = len(models)
 	
-	log.Printf("Loaded %d models for %s", len(models), vendorName)
+	log.Printf("Loaded %d models for vendor %s", len(models), vendorName)
 	if app.StatusBar != nil {
 		app.StatusBar.ShowMessage(fmt.Sprintf("Loaded %d models for %s", len(models), vendorName))
 	}
 	
 	return nil
+}
+
+// ShowError displays an error message in the status bar
+func (app *FabricApp) ShowError(err error) {
+	log.Printf("Error: %v", err)
+	if app.StatusBar != nil {
+		app.StatusBar.ShowError(err.Error())
+	}
+}
+
+// ShowError with string parameter for direct string errors
+func (app *FabricApp) ShowErrorStr(message string) {
+	log.Printf("Error: %s", message)
+	if app.StatusBar != nil {
+		app.StatusBar.ShowError(message)
+	}
 }

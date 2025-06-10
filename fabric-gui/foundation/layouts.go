@@ -187,7 +187,7 @@ func NewSidebarPanel(app *FabricApp) *SidebarPanel {
             
             // Switch to Execute tab if not already there
             if app.state.LastActiveTab != "Execute" {
-                app.mainLayout.MainContent.tabs.Select(0) // Execute tab
+                app.mainLayout.MainContent.tabs.SelectTab(app.mainLayout.MainContent.tabs.Items[0]) // Execute tab
             }
             
             // Show message
@@ -196,7 +196,7 @@ func NewSidebarPanel(app *FabricApp) *SidebarPanel {
             // Deselect after a moment (visual feedback but don't stay highlighted)
             go func() {
                 time.Sleep(100 * time.Millisecond)
-                app.mainWindow.Canvas().Focus(nil) // Remove focus
+                app.window.Canvas().Focus(nil) // Remove focus
             }()
         }
     }
@@ -486,7 +486,7 @@ func (mc *MainContentPanel) executePattern() {
                 mc.app.StatusBar.ShowMessage("Execution completed successfully")
                 
                 // Switch to Results tab
-                mc.tabs.Select(1) // Results tab
+                mc.tabs.SelectTab(mc.tabs.Items[1]) // Results tab
             }
             
             // Re-enable run button
@@ -504,7 +504,7 @@ type InputArea struct {
     
     // Input components
     inputSource *widget.Select
-    textInput   *widget.TextArea
+    textInput   *widget.Entry
     fileInput   *widget.Button
     urlInput    *widget.Entry
     
@@ -545,7 +545,7 @@ func NewInputArea(app *FabricApp) *InputArea {
             // For now, just show filename
             ia.textInput.SetText(fmt.Sprintf("File: %s", reader.URI().Name()))
             ia.updatePreview()
-        }, app.mainWindow)
+        }, app.window)
     })
     ia.fileInput.Hide() // Hidden initially
     
@@ -658,7 +658,7 @@ type OutputArea struct {
     
     // Output components
     outputInfo *widget.Label
-    outputText *widget.TextArea
+    outputText *widget.Entry
     
     // Action buttons
     copyButton *widget.Button
@@ -680,7 +680,7 @@ func NewOutputArea(app *FabricApp) *OutputArea {
     
     // Create action buttons
     oa.copyButton = widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
-        app.mainWindow.Clipboard().SetContent(oa.outputText.Text)
+        app.window.Clipboard().SetContent(oa.outputText.Text)
         app.ShowMessage("Output copied to clipboard")
     })
     
@@ -704,7 +704,7 @@ func NewOutputArea(app *FabricApp) *OutputArea {
             }
             
             app.ShowMessage(fmt.Sprintf("Output saved to %s", writer.URI().Name()))
-        }, app.mainWindow)
+        }, app.window)
     })
     
     oa.clearButton = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), func() {
@@ -761,12 +761,12 @@ type PatternInfoArea struct {
     
     // Pattern info components
     nameLabel       *widget.Label
-    descriptionText *widget.TextArea
+    descriptionText *widget.Entry
     tagsLabel       *widget.Label
     
     // System and user prompts
-    systemPromptText *widget.TextArea
-    userPromptText   *widget.TextArea
+    systemPromptText *widget.Entry
+    userPromptText   *widget.Entry
     
     // Model info
     modelInfoLabel *widget.Label
@@ -911,4 +911,9 @@ func (sb *StatusBar) Container() fyne.CanvasObject {
 // ShowMessage displays a message in the status bar.
 func (sb *StatusBar) ShowMessage(message string) {
     sb.label.SetText(message)
+}
+
+// ShowError displays an error message in the status bar.
+func (sb *StatusBar) ShowError(err string) {
+    sb.label.SetText("Error: " + err)
 }
