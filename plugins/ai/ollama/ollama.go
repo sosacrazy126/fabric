@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	ollamaapi "github.com/ollama/ollama/api"
@@ -32,16 +33,20 @@ func NewClient() (ret *Client) {
 	ret.ApiUrl.Value = defaultBaseUrl
 	ret.ApiKey = ret.PluginBase.AddSetupQuestion("API key", false)
 	ret.ApiKey.Value = ""
+	ret.ApiHttpTimeout = ret.AddSetupQuestionCustom("HTTP Timeout", true,
+		"Specify HTTP timeout duration for Ollama requests (e.g. 30s, 5m, 1h)")
+	ret.ApiHttpTimeout.Value = "20m"
 
 	return
 }
 
 type Client struct {
 	*plugins.PluginBase
-	ApiUrl *plugins.SetupQuestion
-	ApiKey *plugins.SetupQuestion
-	apiUrl *url.URL
-	client *ollamaapi.Client
+	ApiUrl         *plugins.SetupQuestion
+	ApiKey         *plugins.SetupQuestion
+	apiUrl         *url.URL
+	client         *ollamaapi.Client
+	ApiHttpTimeout *plugins.SetupQuestion
 }
 
 type transport_sec struct {
@@ -62,7 +67,19 @@ func (o *Client) configure() (err error) {
 		return
 	}
 
-	o.client = ollamaapi.NewClient(o.apiUrl, &http.Client{Timeout: 1200000 * time.Millisecond, Transport: &transport_sec{underlyingTransport: http.DefaultTransport, ApiKey: o.ApiKey}})
+	timeout := 20 * time.Minute // Default timeout
+
+	if o.ApiHttpTimeout != nil {
+		parsed, err := time.ParseDuration(o.ApiHttpTimeout.Value)
+		if err == nil && o.ApiHttpTimeout.Value != "" {
+			timeout = parsed
+		} else if o.ApiHttpTimeout.Value != "" {
+			fmt.Printf("Invalid HTTP timeout format (%q), using default (20m): %v\n", o.ApiHttpTimeout.Value, err)
+		}
+	}
+
+	o.client = ollamaapi.NewClient(o.apiUrl, &http.Client{Timeout: timeout, Transport: &transport_sec{underlyingTransport: http.DefaultTransport, ApiKey: o.ApiKey}})
+
 	return
 }
 
@@ -137,4 +154,17 @@ func (o *Client) createChatRequest(msgs []*goopenai.ChatCompletionMessage, opts 
 		Options:  options,
 	}
 	return
+}
+
+func (o *Client) NeedsRawMode(modelName string) bool {
+	ollamaPrefixes := []string{
+		"llama3",
+		"llama2",
+	}
+	for _, prefix := range ollamaPrefixes {
+		if strings.HasPrefix(modelName, prefix) {
+			return true
+		}
+	}
+	return false
 }

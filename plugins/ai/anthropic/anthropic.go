@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/samber/lo"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/danielmiessler/fabric/common"
@@ -27,17 +29,19 @@ func NewClient() (ret *Client) {
 	ret.ApiBaseURL = ret.AddSetupQuestion("API Base URL", false)
 	ret.ApiBaseURL.Value = defaultBaseUrl
 	ret.ApiKey = ret.PluginBase.AddSetupQuestion("API key", true)
+	ret.UseWebTool = ret.AddSetupQuestionBool("Web Search Tool Enabled", false)
+	ret.WebToolLocation = ret.AddSetupQuestionCustom("Web Search Tool Location", false,
+		"Enter your approximate timezone location for web search (e.g., 'America/Los_Angeles', see https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).")
 
 	ret.maxTokens = 4096
 	ret.defaultRequiredUserMessage = "Hi"
 	ret.models = []string{
-		anthropic.ModelClaude3_7SonnetLatest, anthropic.ModelClaude3_7Sonnet20250219,
-		anthropic.ModelClaude3_5HaikuLatest, anthropic.ModelClaude3_5Haiku20241022,
-		anthropic.ModelClaude3_5SonnetLatest, anthropic.ModelClaude3_5Sonnet20241022,
-		anthropic.ModelClaude_3_5_Sonnet_20240620, anthropic.ModelClaude3OpusLatest,
-		anthropic.ModelClaude_3_Opus_20240229, anthropic.ModelClaude_3_Sonnet_20240229,
-		anthropic.ModelClaude_3_Haiku_20240307, anthropic.ModelClaude_2_1,
-		anthropic.ModelClaude_2_0,
+		string(anthropic.ModelClaude3_7SonnetLatest), string(anthropic.ModelClaude3_7Sonnet20250219),
+		string(anthropic.ModelClaude3_5HaikuLatest), string(anthropic.ModelClaude3_5Haiku20241022),
+		string(anthropic.ModelClaude3_5SonnetLatest), string(anthropic.ModelClaude3_5Sonnet20241022),
+		string(anthropic.ModelClaude_3_5_Sonnet_20240620), string(anthropic.ModelClaude3OpusLatest),
+		string(anthropic.ModelClaude_3_Opus_20240229), string(anthropic.ModelClaude_3_Haiku_20240307),
+		string(anthropic.ModelClaudeOpus4_20250514), string(anthropic.ModelClaudeSonnet4_20250514),
 	}
 
 	return
@@ -45,8 +49,10 @@ func NewClient() (ret *Client) {
 
 type Client struct {
 	*plugins.PluginBase
-	ApiBaseURL *plugins.SetupQuestion
-	ApiKey     *plugins.SetupQuestion
+	ApiBaseURL      *plugins.SetupQuestion
+	ApiKey          *plugins.SetupQuestion
+	UseWebTool      *plugins.SetupQuestion
+	WebToolLocation *plugins.SetupQuestion
 
 	maxTokens                  int
 	defaultRequiredUserMessage string
@@ -87,17 +93,12 @@ func (an *Client) SendStream(
 	if len(messages) == 0 {
 		close(channel)
 		// No messages to send after normalization, consider this a non-error condition for streaming.
-		return nil
+		return
 	}
 
 	ctx := context.Background()
-	stream := an.client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
-		Model:       opts.Model,
-		MaxTokens:   int64(an.maxTokens),
-		TopP:        anthropic.Opt(opts.TopP),
-		Temperature: anthropic.Opt(opts.Temperature),
-		Messages:    messages,
-	})
+
+	stream := an.client.Messages.NewStreaming(ctx, an.buildMessageParams(messages, opts))
 
 	for stream.Next() {
 		event := stream.Current()
@@ -115,29 +116,63 @@ func (an *Client) SendStream(
 	return
 }
 
-func (an *Client) Send(ctx context.Context, msgs []*goopenai.ChatCompletionMessage, opts *common.ChatOptions) (ret string, err error) {
-	messages := an.toMessages(msgs)
-	if len(messages) == 0 {
-		// No messages to send after normalization, return empty string and no error.
-		return "", nil
-	}
+func (an *Client) buildMessageParams(msgs []anthropic.MessageParam, opts *common.ChatOptions) (
+	params anthropic.MessageNewParams) {
 
-	var message *anthropic.Message
-	if message, err = an.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:       opts.Model,
+	params = anthropic.MessageNewParams{
+		Model:       anthropic.Model(opts.Model),
 		MaxTokens:   int64(an.maxTokens),
 		TopP:        anthropic.Opt(opts.TopP),
 		Temperature: anthropic.Opt(opts.Temperature),
-		Messages:    messages,
-	}); err != nil {
+		Messages:    msgs,
+	}
+
+	if plugins.ParseBoolElseFalse(an.UseWebTool.Value) {
+		// Build the web-search tool definition:
+		webTool := anthropic.WebSearchTool20250305Param{
+			Name:         "web_search",          // string literal instead of constant
+			Type:         "web_search_20250305", // string literal instead of constant
+			CacheControl: anthropic.NewCacheControlEphemeralParam(),
+			// Optional: restrict domains or max uses
+			// AllowedDomains: []string{"wikipedia.org", "openai.com"},
+			// MaxUses:        anthropic.Opt[int64](5),
+		}
+
+		if an.WebToolLocation.Value != "" {
+			webTool.UserLocation.Type = "approximate"
+			webTool.UserLocation.Timezone = anthropic.Opt(an.WebToolLocation.Value)
+		}
+
+		// Wrap it in the union:
+		params.Tools = []anthropic.ToolUnionParam{
+			{OfWebSearchTool20250305: &webTool},
+		}
+	}
+	return
+}
+
+func (an *Client) Send(ctx context.Context, msgs []*goopenai.ChatCompletionMessage, opts *common.ChatOptions) (
+	ret string, err error) {
+
+	messages := an.toMessages(msgs)
+	if len(messages) == 0 {
+		// No messages to send after normalization, return empty string and no error.
 		return
 	}
 
-	if len(message.Content) == 0 {
-		// Model returned no content blocks.
-		return "", nil
+	var message *anthropic.Message
+	if message, err = an.client.Messages.New(ctx, an.buildMessageParams(messages, opts)); err != nil {
+		return
 	}
-	ret = message.Content[0].Text
+
+	texts := lo.FilterMap(message.Content, func(block anthropic.ContentBlockUnion, _ int) (ret string, ok bool) {
+		if ok = block.Type == "text" && block.Text != ""; ok {
+			ret = block.Text
+		}
+		return
+	})
+	ret = strings.Join(texts, "")
+
 	return
 }
 
@@ -205,4 +240,8 @@ func (an *Client) toMessages(msgs []*goopenai.ChatCompletionMessage) (ret []anth
 	}
 
 	return anthropicMessages
+}
+
+func (an *Client) NeedsRawMode(modelName string) bool {
+	return false
 }
