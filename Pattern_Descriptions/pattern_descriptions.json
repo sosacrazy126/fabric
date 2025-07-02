@@ -1634,8 +1634,8 @@
       ]
     },
     {
-      "patternName": "write_essay",
-      "description": "Create essays with thesis statements and arguments.",
+      "patternName": "write_essay_pg",
+      "description": "Create essays with thesis statements and arguments in the style of Paul Graham.",
       "tags": [
         "WRITING",
         "RESEARCH",
@@ -1703,22 +1703,22 @@
     {
       "patternName": "analyze_bill",
       "description": "Analyze a legislative bill and implications.",
-      "tags": [ 
+      "tags": [
         "ANALYSIS",
         "BILL"
       ]
     },
     {
       "patternName": "analyze_bill_short",
-      "description": "Consended - Analyze a legislative bill and implications.",
-      "tags": [ 
+      "description": "Condensed - Analyze a legislative bill and implications.",
+      "tags": [
         "ANALYSIS",
         "BILL"
       ]
     },
     {
       "patternName": "create_coding_feature",
-      "description": "[Description pending]",
+      "description": "Generate secure and composable code features using latest technology and best practices.",
       "tags": [
         "DEVELOPMENT"
       ]
@@ -1773,6 +1773,76 @@
       "description": "Summarize YouTube videos with key points and timestamps.",
       "tags": [
         "SUMMARIZE"
+      ]
+    },
+    {
+      "patternName": "analyze_paper_simple",
+      "description": "Analyze research papers to determine primary findings and assess scientific rigor.",
+      "tags": [
+        "ANALYSIS",
+        "RESEARCH",
+        "WRITING"
+      ]
+    },
+    {
+      "patternName": "analyze_terraform_plan",
+      "description": "Analyze Terraform plans for infrastructure changes, security risks, and cost implications.",
+      "tags": [
+        "ANALYSIS",
+        "DEVOPS"
+      ]
+    },
+    {
+      "patternName": "create_mnemonic_phrases",
+      "description": "Create memorable mnemonic sentences using given words in exact order for memory aids.",
+      "tags": [
+        "CREATIVITY",
+        "LEARNING"
+      ]
+    },
+    {
+      "patternName": "summarize_board_meeting",
+      "description": "Convert board meeting transcripts into formal meeting notes for corporate records.",
+      "tags": [
+        "ANALYSIS",
+        "BUSINESS"
+      ]
+    },
+    {
+      "patternName": "write_essay",
+      "description": "Write essays on given topics in the distinctive style of specified authors.",
+      "tags": [
+        "WRITING",
+        "CREATIVITY"
+      ]
+    },
+    {
+      "patternName": "extract_alpha",
+      "description": "Extracts the most novel and surprising ideas (\"alpha\") from content, inspired by information theory.",
+      "tags": [
+        "EXTRACT",
+        "ANALYSIS",
+        "CR THINKING",
+        "WISDOM"
+      ]
+    },
+    {
+      "patternName": "extract_mcp_servers",
+      "description": "Analyzes content to identify and extract detailed information about Model Context Protocol (MCP) servers.",
+      "tags": [
+        "ANALYSIS",
+        "EXTRACT",
+        "DEVELOPMENT",
+        "AI"
+      ]
+    },
+    {
+      "patternName": "review_code",
+      "description": "Performs a comprehensive code review, providing detailed feedback on correctness, security, and performance.",
+      "tags": [
+        "DEVELOPMENT",
+        "REVIEW",
+        "SECURITY"
       ]
     }
   ]

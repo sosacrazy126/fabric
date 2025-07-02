@@ -3,14 +3,13 @@ package restapi
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
-	goopenai "github.com/sashabaranov/go-openai"
+	"github.com/danielmiessler/fabric/chat"
 
 	"github.com/danielmiessler/fabric/common"
 	"github.com/danielmiessler/fabric/core"
@@ -24,12 +23,13 @@ type ChatHandler struct {
 }
 
 type PromptRequest struct {
-	UserInput    string `json:"userInput"`
-	Vendor       string `json:"vendor"`
-	Model        string `json:"model"`
-	ContextName  string `json:"contextName"`
-	PatternName  string `json:"patternName"`
-	StrategyName string `json:"strategyName"` // Optional strategy name
+	UserInput    string            `json:"userInput"`
+	Vendor       string            `json:"vendor"`
+	Model        string            `json:"model"`
+	ContextName  string            `json:"contextName"`
+	PatternName  string            `json:"patternName"`
+	StrategyName string            `json:"strategyName"`        // Optional strategy name
+	Variables    map[string]string `json:"variables,omitempty"` // Pattern variables
 }
 
 type ChatRequest struct {
@@ -94,7 +94,7 @@ func (h *ChatHandler) HandleChat(c *gin.Context) {
 				// Load and prepend strategy prompt if strategyName is set
 				if p.StrategyName != "" {
 					strategyFile := filepath.Join(os.Getenv("HOME"), ".config", "fabric", "strategies", p.StrategyName+".json")
-					data, err := ioutil.ReadFile(strategyFile)
+					data, err := os.ReadFile(strategyFile)
 					if err == nil {
 						var s struct {
 							Prompt string `json:"prompt"`
@@ -114,13 +114,14 @@ func (h *ChatHandler) HandleChat(c *gin.Context) {
 
 				// Pass the language received in the initial request to the common.ChatRequest
 				chatReq := &common.ChatRequest{
-					Message: &goopenai.ChatCompletionMessage{
+					Message: &chat.ChatCompletionMessage{
 						Role:    "user",
 						Content: p.UserInput,
 					},
-					PatternName: p.PatternName,
-					ContextName: p.ContextName,
-					Language:    request.Language, // Pass the language field
+					PatternName:      p.PatternName,
+					ContextName:      p.ContextName,
+					PatternVariables: p.Variables,      // Pass pattern variables
+					Language:         request.Language, // Pass the language field
 				}
 
 				opts := &common.ChatOptions{

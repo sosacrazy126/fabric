@@ -3,100 +3,60 @@ package openai
 import (
 	"testing"
 
+	"github.com/danielmiessler/fabric/chat"
 	"github.com/danielmiessler/fabric/common"
-	"github.com/sashabaranov/go-openai"
-	goopenai "github.com/sashabaranov/go-openai"
+	openai "github.com/openai/openai-go"
+	"github.com/openai/openai-go/shared"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestBuildChatCompletionRequestPinSeed(t *testing.T) {
+func TestBuildResponseRequestWithMaxTokens(t *testing.T) {
 
-	var msgs []*goopenai.ChatCompletionMessage
+	var msgs []*chat.ChatCompletionMessage
 
 	for i := 0; i < 2; i++ {
-		msgs = append(msgs, &goopenai.ChatCompletionMessage{
+		msgs = append(msgs, &chat.ChatCompletionMessage{
 			Role:    "User",
 			Content: "My msg",
 		})
 	}
 
 	opts := &common.ChatOptions{
-		Temperature:      0.8,
-		TopP:             0.9,
-		PresencePenalty:  0.1,
-		FrequencyPenalty: 0.2,
-		Raw:              false,
-		Seed:             1,
-	}
-
-	var expectedMessages []openai.ChatCompletionMessage
-
-	for i := 0; i < 2; i++ {
-		expectedMessages = append(expectedMessages,
-			openai.ChatCompletionMessage{
-				Role:    msgs[i].Role,
-				Content: msgs[i].Content,
-			},
-		)
-	}
-
-	var expectedRequest = goopenai.ChatCompletionRequest{
-		Model:            opts.Model,
-		Temperature:      float32(opts.Temperature),
-		TopP:             float32(opts.TopP),
-		PresencePenalty:  float32(opts.PresencePenalty),
-		FrequencyPenalty: float32(opts.FrequencyPenalty),
-		Messages:         expectedMessages,
-		Seed:             &opts.Seed,
+		Temperature: 0.8,
+		TopP:        0.9,
+		Raw:         false,
+		MaxTokens:   50,
 	}
 
 	var client = NewClient()
-	request := client.buildChatCompletionRequest(msgs, opts)
-	assert.Equal(t, expectedRequest, request)
+	request := client.buildResponseParams(msgs, opts)
+	assert.Equal(t, shared.ResponsesModel(opts.Model), request.Model)
+	assert.Equal(t, openai.Float(opts.Temperature), request.Temperature)
+	assert.Equal(t, openai.Float(opts.TopP), request.TopP)
+	assert.Equal(t, openai.Int(int64(opts.MaxTokens)), request.MaxOutputTokens)
 }
 
-func TestBuildChatCompletionRequestNilSeed(t *testing.T) {
+func TestBuildResponseRequestNoMaxTokens(t *testing.T) {
 
-	var msgs []*goopenai.ChatCompletionMessage
+	var msgs []*chat.ChatCompletionMessage
 
 	for i := 0; i < 2; i++ {
-		msgs = append(msgs, &goopenai.ChatCompletionMessage{
+		msgs = append(msgs, &chat.ChatCompletionMessage{
 			Role:    "User",
 			Content: "My msg",
 		})
 	}
 
 	opts := &common.ChatOptions{
-		Temperature:      0.8,
-		TopP:             0.9,
-		PresencePenalty:  0.1,
-		FrequencyPenalty: 0.2,
-		Raw:              false,
-		Seed:             0,
-	}
-
-	var expectedMessages []openai.ChatCompletionMessage
-
-	for i := 0; i < 2; i++ {
-		expectedMessages = append(expectedMessages,
-			openai.ChatCompletionMessage{
-				Role:    msgs[i].Role,
-				Content: msgs[i].Content,
-			},
-		)
-	}
-
-	var expectedRequest = goopenai.ChatCompletionRequest{
-		Model:            opts.Model,
-		Temperature:      float32(opts.Temperature),
-		TopP:             float32(opts.TopP),
-		PresencePenalty:  float32(opts.PresencePenalty),
-		FrequencyPenalty: float32(opts.FrequencyPenalty),
-		Messages:         expectedMessages,
-		Seed:             nil,
+		Temperature: 0.8,
+		TopP:        0.9,
+		Raw:         false,
 	}
 
 	var client = NewClient()
-	request := client.buildChatCompletionRequest(msgs, opts)
-	assert.Equal(t, expectedRequest, request)
+	request := client.buildResponseParams(msgs, opts)
+	assert.Equal(t, shared.ResponsesModel(opts.Model), request.Model)
+	assert.Equal(t, openai.Float(opts.Temperature), request.Temperature)
+	assert.Equal(t, openai.Float(opts.TopP), request.TopP)
+	assert.False(t, request.MaxOutputTokens.Valid())
 }

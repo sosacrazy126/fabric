@@ -2,19 +2,22 @@ package openai
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"io"
-	"log/slog"
+	"slices"
 	"strings"
 
+	"github.com/danielmiessler/fabric/chat"
 	"github.com/danielmiessler/fabric/common"
 	"github.com/danielmiessler/fabric/plugins"
-	goopenai "github.com/sashabaranov/go-openai"
+	openai "github.com/openai/openai-go"
+	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/packages/pagination"
+	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/shared"
+	"github.com/openai/openai-go/shared/constant"
 )
 
 func NewClient() (ret *Client) {
-	return NewClientCompatible("OpenAI", "https://api.openai.com/v1", nil)
+	return NewClientCompatibleWithResponses("OpenAI", "https://api.openai.com/v1", true, nil)
 }
 
 func NewClientCompatible(vendorName string, defaultBaseUrl string, configureCustom func() error) (ret *Client) {
@@ -23,6 +26,17 @@ func NewClientCompatible(vendorName string, defaultBaseUrl string, configureCust
 	ret.ApiKey = ret.AddSetupQuestion("API Key", true)
 	ret.ApiBaseURL = ret.AddSetupQuestion("API Base URL", false)
 	ret.ApiBaseURL.Value = defaultBaseUrl
+
+	return
+}
+
+func NewClientCompatibleWithResponses(vendorName string, defaultBaseUrl string, implementsResponses bool, configureCustom func() error) (ret *Client) {
+	ret = NewClientCompatibleNoSetupQuestions(vendorName, configureCustom)
+
+	ret.ApiKey = ret.AddSetupQuestion("API Key", true)
+	ret.ApiBaseURL = ret.AddSetupQuestion("API Base URL", false)
+	ret.ApiBaseURL.Value = defaultBaseUrl
+	ret.ImplementsResponses = implementsResponses
 
 	return
 }
@@ -45,82 +59,87 @@ func NewClientCompatibleNoSetupQuestions(vendorName string, configureCustom func
 
 type Client struct {
 	*plugins.PluginBase
-	ApiKey     *plugins.SetupQuestion
-	ApiBaseURL *plugins.SetupQuestion
-	ApiClient  *goopenai.Client
+	ApiKey              *plugins.SetupQuestion
+	ApiBaseURL          *plugins.SetupQuestion
+	ApiClient           *openai.Client
+	ImplementsResponses bool // Whether this provider supports the Responses API
 }
 
 func (o *Client) configure() (ret error) {
-	config := goopenai.DefaultConfig(o.ApiKey.Value)
+	opts := []option.RequestOption{option.WithAPIKey(o.ApiKey.Value)}
 	if o.ApiBaseURL.Value != "" {
-		config.BaseURL = o.ApiBaseURL.Value
+		opts = append(opts, option.WithBaseURL(o.ApiBaseURL.Value))
 	}
-	o.ApiClient = goopenai.NewClientWithConfig(config)
+	client := openai.NewClient(opts...)
+	o.ApiClient = &client
 	return
 }
 
 func (o *Client) ListModels() (ret []string, err error) {
-	var models goopenai.ModelsList
-	if models, err = o.ApiClient.ListModels(context.Background()); err != nil {
+	var page *pagination.Page[openai.Model]
+	if page, err = o.ApiClient.Models.List(context.Background()); err != nil {
 		return
 	}
-
-	model := models.Models
-	for _, mod := range model {
+	for _, mod := range page.Data {
 		ret = append(ret, mod.ID)
 	}
 	return
 }
 
 func (o *Client) SendStream(
-	msgs []*goopenai.ChatCompletionMessage, opts *common.ChatOptions, channel chan string,
+	msgs []*chat.ChatCompletionMessage, opts *common.ChatOptions, channel chan string,
 ) (err error) {
-	req := o.buildChatCompletionRequest(msgs, opts)
-	req.Stream = true
-
-	var stream *goopenai.ChatCompletionStream
-	if stream, err = o.ApiClient.CreateChatCompletionStream(context.Background(), req); err != nil {
-		fmt.Printf("ChatCompletionStream error: %v\n", err)
-		return
+	// Use Responses API for OpenAI, Chat Completions API for other providers
+	if o.supportsResponsesAPI() {
+		return o.sendStreamResponses(msgs, opts, channel)
 	}
+	return o.sendStreamChatCompletions(msgs, opts, channel)
+}
 
-	defer stream.Close()
+func (o *Client) sendStreamResponses(
+	msgs []*chat.ChatCompletionMessage, opts *common.ChatOptions, channel chan string,
+) (err error) {
+	defer close(channel)
 
-	for {
-		var response goopenai.ChatCompletionStreamResponse
-		if response, err = stream.Recv(); err == nil {
-			if len(response.Choices) > 0 {
-				channel <- response.Choices[0].Delta.Content
-			} else {
-				channel <- "\n"
-				close(channel)
-				break
-			}
-		} else if errors.Is(err, io.EOF) {
-			channel <- "\n"
-			close(channel)
-			err = nil
-			break
-		} else if err != nil {
-			fmt.Printf("\nStream error: %v\n", err)
-			break
+	req := o.buildResponseParams(msgs, opts)
+	stream := o.ApiClient.Responses.NewStreaming(context.Background(), req)
+	for stream.Next() {
+		event := stream.Current()
+		switch event.Type {
+		case string(constant.ResponseOutputTextDelta("").Default()):
+			channel <- event.AsResponseOutputTextDelta().Delta
+		case string(constant.ResponseOutputTextDone("").Default()):
+			channel <- event.AsResponseOutputTextDone().Text
 		}
 	}
+	if stream.Err() == nil {
+		channel <- "\n"
+	}
+	return stream.Err()
+}
+
+func (o *Client) Send(ctx context.Context, msgs []*chat.ChatCompletionMessage, opts *common.ChatOptions) (ret string, err error) {
+	// Use Responses API for OpenAI, Chat Completions API for other providers
+	if o.supportsResponsesAPI() {
+		return o.sendResponses(ctx, msgs, opts)
+	}
+	return o.sendChatCompletions(ctx, msgs, opts)
+}
+
+func (o *Client) sendResponses(ctx context.Context, msgs []*chat.ChatCompletionMessage, opts *common.ChatOptions) (ret string, err error) {
+	req := o.buildResponseParams(msgs, opts)
+
+	var resp *responses.Response
+	if resp, err = o.ApiClient.Responses.New(ctx, req); err != nil {
+		return
+	}
+	ret = o.extractText(resp)
 	return
 }
 
-func (o *Client) Send(ctx context.Context, msgs []*goopenai.ChatCompletionMessage, opts *common.ChatOptions) (ret string, err error) {
-	req := o.buildChatCompletionRequest(msgs, opts)
-
-	var resp goopenai.ChatCompletionResponse
-	if resp, err = o.ApiClient.CreateChatCompletion(ctx, req); err != nil {
-		return
-	}
-	if len(resp.Choices) > 0 {
-		ret = resp.Choices[0].Message.Content
-		slog.Debug("SystemFingerprint: " + resp.SystemFingerprint)
-	}
-	return
+// supportsResponsesAPI determines if the provider supports the new Responses API
+func (o *Client) supportsResponsesAPI() bool {
+	return o.ImplementsResponses
 }
 
 func (o *Client) NeedsRawMode(modelName string) bool {
@@ -129,64 +148,98 @@ func (o *Client) NeedsRawMode(modelName string) bool {
 		"o3",
 		"o4",
 	}
+	openAIModelsNeedingRaw := []string{
+		"gpt-4o-mini-search-preview",
+		"gpt-4o-mini-search-preview-2025-03-11",
+		"gpt-4o-search-preview",
+		"gpt-4o-search-preview-2025-03-11",
+	}
 	for _, prefix := range openaiModelsPrefixes {
 		if strings.HasPrefix(modelName, prefix) {
 			return true
 		}
 	}
-	return false
+	return slices.Contains(openAIModelsNeedingRaw, modelName)
 }
 
-func (o *Client) buildChatCompletionRequest(
-	inputMsgs []*goopenai.ChatCompletionMessage, opts *common.ChatOptions,
-) (ret goopenai.ChatCompletionRequest) {
+func (o *Client) buildResponseParams(
+	inputMsgs []*chat.ChatCompletionMessage, opts *common.ChatOptions,
+) (ret responses.ResponseNewParams) {
 
-	// Create a new slice for messages to be sent, converting from []*Msg to []Msg.
-	// This also serves as a mutable copy for provider-specific modifications.
-	messagesForRequest := make([]goopenai.ChatCompletionMessage, len(inputMsgs))
+	items := make([]responses.ResponseInputItemUnionParam, len(inputMsgs))
 	for i, msgPtr := range inputMsgs {
-		messagesForRequest[i] = *msgPtr // Dereference and copy
+		msg := *msgPtr
+		if strings.Contains(opts.Model, "deepseek") && len(inputMsgs) == 1 && msg.Role == chat.ChatMessageRoleSystem {
+			msg.Role = chat.ChatMessageRoleUser
+		}
+		items[i] = convertMessage(msg)
 	}
 
-	// Provider-specific modification for DeepSeek:
-	// DeepSeek requires the last message to be a user message.
-	// If fabric constructs a single system message (common when a pattern includes user input),
-	// we change its role to user for DeepSeek.
-	if strings.Contains(opts.Model, "deepseek") { // Heuristic to identify DeepSeek models
-		if len(messagesForRequest) == 1 && messagesForRequest[0].Role == goopenai.ChatMessageRoleSystem {
-			messagesForRequest[0].Role = goopenai.ChatMessageRoleUser
-		}
-		// Note: This handles the most common case arising from pattern usage.
-		// More complex scenarios where a multi-message sequence ends in 'system'
-		// are not currently expected from chatter.go's BuildSession logic for OpenAI providers
-		// but might require further rules if they arise.
+	ret = responses.ResponseNewParams{
+		Model: shared.ResponsesModel(opts.Model),
+		Input: responses.ResponseNewParamsInputUnion{
+			OfInputItemList: items,
+		},
 	}
 
-	if opts.Raw {
-		ret = goopenai.ChatCompletionRequest{
-			Model:    opts.Model,
-			Messages: messagesForRequest,
+	if !opts.Raw {
+		ret.Temperature = openai.Float(opts.Temperature)
+		ret.TopP = openai.Float(opts.TopP)
+		if opts.MaxTokens != 0 {
+			ret.MaxOutputTokens = openai.Int(int64(opts.MaxTokens))
 		}
-	} else {
-		if opts.Seed == 0 {
-			ret = goopenai.ChatCompletionRequest{
-				Model:            opts.Model,
-				Temperature:      float32(opts.Temperature),
-				TopP:             float32(opts.TopP),
-				PresencePenalty:  float32(opts.PresencePenalty),
-				FrequencyPenalty: float32(opts.FrequencyPenalty),
-				Messages:         messagesForRequest,
+
+		// Add parameters not officially supported by Responses API as extra fields
+		extraFields := make(map[string]any)
+		if opts.PresencePenalty != 0 {
+			extraFields["presence_penalty"] = opts.PresencePenalty
+		}
+		if opts.FrequencyPenalty != 0 {
+			extraFields["frequency_penalty"] = opts.FrequencyPenalty
+		}
+		if opts.Seed != 0 {
+			extraFields["seed"] = opts.Seed
+		}
+		if len(extraFields) > 0 {
+			ret.SetExtraFields(extraFields)
+		}
+	}
+	return
+}
+
+func convertMessage(msg chat.ChatCompletionMessage) responses.ResponseInputItemUnionParam {
+	result := convertMessageCommon(msg)
+	role := responses.EasyInputMessageRole(result.Role)
+
+	if result.HasMultiContent {
+		var parts []responses.ResponseInputContentUnionParam
+		for _, p := range result.MultiContent {
+			switch p.Type {
+			case chat.ChatMessagePartTypeText:
+				parts = append(parts, responses.ResponseInputContentParamOfInputText(p.Text))
+			case chat.ChatMessagePartTypeImageURL:
+				part := responses.ResponseInputContentParamOfInputImage(responses.ResponseInputImageDetailAuto)
+				if part.OfInputImage != nil {
+					part.OfInputImage.ImageURL = openai.String(p.ImageURL.URL)
+				}
+				parts = append(parts, part)
 			}
-		} else {
-			ret = goopenai.ChatCompletionRequest{
-				Model:            opts.Model,
-				Temperature:      float32(opts.Temperature),
-				TopP:             float32(opts.TopP),
-				PresencePenalty:  float32(opts.PresencePenalty),
-				FrequencyPenalty: float32(opts.FrequencyPenalty),
-				Messages:         messagesForRequest,
-				Seed:             &opts.Seed,
+		}
+		contentList := responses.ResponseInputMessageContentListParam(parts)
+		return responses.ResponseInputItemParamOfMessage(contentList, role)
+	}
+	return responses.ResponseInputItemParamOfMessage(result.Content, role)
+}
+
+func (o *Client) extractText(resp *responses.Response) (ret string) {
+	for _, item := range resp.Output {
+		if item.Type == "message" {
+			for _, c := range item.Content {
+				if c.Type == "output_text" {
+					ret += c.AsOutputText().Text
+				}
 			}
+			break
 		}
 	}
 	return
