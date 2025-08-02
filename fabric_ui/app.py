@@ -1,3 +1,9 @@
+import sys, pathlib
+pkg_dir = pathlib.Path(__file__).resolve().parent
+repo_root = pkg_dir.parent
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 import streamlit as st
 import logging
 from pathlib import Path
